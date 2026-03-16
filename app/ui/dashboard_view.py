@@ -1,5 +1,6 @@
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -15,6 +16,7 @@ from app.services.sim_controller import SimController
 from app.state.state_store import DroneMode, StateStore
 from integrations.mavsdk.connector import DroneConnector
 from mission.execution.executor import LawnmowerExecutor, MissionStatus
+from mission.execution.mission_runner import UploadedMissionRunner
 from app.ui.mission_planner_view import MissionPlannerView
 
 
@@ -222,9 +224,13 @@ _STATUS_STYLES = {
 
 
 class MissionPanel(QGroupBox):
-    def __init__(self, executor: LawnmowerExecutor, parent=None):
+    def __init__(self, executor: LawnmowerExecutor,
+                 runner: UploadedMissionRunner, parent=None):
         super().__init__("Mission", parent)
         self._executor = executor
+        self._runner = runner
+        self._active = None  # whichever was started most recently
+
         self._build_ui()
 
         bus.vehicle_connected.connect(self._on_connected)
@@ -232,14 +238,17 @@ class MissionPanel(QGroupBox):
         bus.mission_started.connect(lambda: self._set_status(MissionStatus.RUNNING))
         bus.mission_completed.connect(lambda: self._set_status(MissionStatus.COMPLETE))
         bus.mission_aborted.connect(lambda _: self._set_status(MissionStatus.ABORTED))
+        bus.mission_uploaded.connect(self._on_mission_uploaded)
 
     def _build_ui(self) -> None:
-        layout = QHBoxLayout(self)
-        layout.setSpacing(12)
+        root = QVBoxLayout(self)
+        root.setSpacing(6)
 
+        # Status row
+        status_row = QHBoxLayout()
         label = QLabel("STATUS:")
         label.setStyleSheet("color: #888; font-size: 11px; letter-spacing: 1px;")
-        layout.addWidget(label)
+        status_row.addWidget(label)
 
         self._status_lbl = QLabel("IDLE")
         self._status_lbl.setFixedWidth(80)
@@ -248,22 +257,37 @@ class MissionPanel(QGroupBox):
             "color: #888888; font-weight: bold; font-size: 13px;"
             "background: #1e1e1e; border-radius: 4px; padding: 3px 8px;"
         )
-        layout.addWidget(self._status_lbl)
-
-        layout.addStretch()
-
-        self._start_btn = QPushButton("Start Lawnmower Search")
-        self._start_btn.setFixedWidth(200)
-        self._start_btn.setEnabled(False)
-        self._start_btn.clicked.connect(self._on_start)
-        layout.addWidget(self._start_btn)
+        status_row.addWidget(self._status_lbl)
+        status_row.addStretch()
 
         self._abort_btn = QPushButton("Abort")
         self._abort_btn.setFixedWidth(80)
         self._abort_btn.setEnabled(False)
         self._abort_btn.setStyleSheet("color: #f44336;")
         self._abort_btn.clicked.connect(self._on_abort)
-        layout.addWidget(self._abort_btn)
+        status_row.addWidget(self._abort_btn)
+
+        # Action row
+        action_row = QHBoxLayout()
+
+        self._lawnmower_btn = QPushButton("Start Lawnmower Search")
+        self._lawnmower_btn.setFixedWidth(200)
+        self._lawnmower_btn.setEnabled(False)
+        self._lawnmower_btn.setToolTip("Offboard velocity lawnmower — no upload required")
+        self._lawnmower_btn.clicked.connect(self._on_start_lawnmower)
+        action_row.addWidget(self._lawnmower_btn)
+
+        self._mission_btn = QPushButton("Start Uploaded Mission")
+        self._mission_btn.setFixedWidth(200)
+        self._mission_btn.setEnabled(False)
+        self._mission_btn.setToolTip("Execute the mission currently uploaded to the drone")
+        self._mission_btn.clicked.connect(self._on_start_mission)
+        action_row.addWidget(self._mission_btn)
+
+        action_row.addStretch()
+
+        root.addLayout(status_row)
+        root.addLayout(action_row)
 
     def _set_status(self, status: MissionStatus) -> None:
         text, color = _STATUS_STYLES[status]
@@ -273,22 +297,40 @@ class MissionPanel(QGroupBox):
             f"background: #1e1e1e; border-radius: 4px; padding: 3px 8px;"
         )
         running = status == MissionStatus.RUNNING
-        self._start_btn.setEnabled(not running)
+        self._lawnmower_btn.setEnabled(not running)
+        self._mission_btn.setEnabled(not running and self._mission_uploaded)
         self._abort_btn.setEnabled(running)
 
     def _on_connected(self) -> None:
-        self._start_btn.setEnabled(True)
+        self._lawnmower_btn.setEnabled(True)
+        # mission_btn only enabled after a mission has been uploaded this session
 
     def _on_disconnected(self) -> None:
-        self._start_btn.setEnabled(False)
+        self._lawnmower_btn.setEnabled(False)
+        self._mission_btn.setEnabled(False)
         self._abort_btn.setEnabled(False)
+        self._active = None
         self._set_status(MissionStatus.IDLE)
 
-    def _on_start(self) -> None:
+    def _on_mission_uploaded(self) -> None:
+        self._mission_uploaded = True
+        if self._lawnmower_btn.isEnabled():  # i.e. connected and not running
+            self._mission_btn.setEnabled(True)
+
+    def _on_start_lawnmower(self) -> None:
+        self._active = self._executor
         self._executor.start()
 
+    def _on_start_mission(self) -> None:
+        self._active = self._runner
+        self._runner.start()
+
     def _on_abort(self) -> None:
-        self._executor.abort()
+        if self._active:
+            self._active.abort()
+
+    # Track whether a mission has been uploaded this session
+    _mission_uploaded = False
 
 
 # ── DashboardView ─────────────────────────────────────────────────────────────
@@ -301,14 +343,19 @@ class DashboardView(QWidget):
         self._sim = sim_controller
         self._connector = connector
         self._executor = LawnmowerExecutor(self)
+        self._runner = UploadedMissionRunner(self)
         self._build_ui()
-        self._wire_executor()
+        self._wire_executors()
 
-    def _wire_executor(self) -> None:
+    def _wire_executors(self) -> None:
         bus.vehicle_connected.connect(
             lambda: self._executor.bind(self._connector.drone, self._connector.loop)
         )
+        bus.vehicle_connected.connect(
+            lambda: self._runner.bind(self._connector.drone, self._connector.loop)
+        )
         bus.vehicle_disconnected.connect(self._executor.unbind)
+        bus.vehicle_disconnected.connect(self._runner.unbind)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -321,12 +368,19 @@ class DashboardView(QWidget):
         mode_badge.setStyleSheet(
             "font-weight: bold; font-size: 13px; color: #4caf50; letter-spacing: 1px;"
         )
+        self._world_combo = QComboBox()
+        self._world_combo.addItems(["baylands", "lawn", "windy", "forest", "default"])
+        self._world_combo.setFixedWidth(100)
+        self._world_combo.setVisible(self._state.mode == DroneMode.SIM)
+
         self._start_btn = QPushButton("Start Sim Stack")
         self._start_btn.setFixedWidth(160)
         self._start_btn.clicked.connect(self._on_start_sim)
         self._start_btn.setVisible(self._state.mode == DroneMode.SIM)
+
         header.addWidget(mode_badge)
         header.addStretch()
+        header.addWidget(self._world_combo)
         header.addWidget(self._start_btn)
 
         connect_row = ConnectPanel(self._connector)
@@ -346,7 +400,7 @@ class DashboardView(QWidget):
         panels.addWidget(TelemetryPanel(), stretch=3)
         panels.addWidget(SystemHealthPanel(self._sim), stretch=1)
         ov.addLayout(panels)
-        ov.addWidget(MissionPanel(self._executor))
+        ov.addWidget(MissionPanel(self._executor, self._runner))
         ov.addStretch()
         tabs.addTab(overview, "Overview")
 
@@ -360,8 +414,10 @@ class DashboardView(QWidget):
 
     def _on_start_sim(self) -> None:
         self._start_btn.setEnabled(False)
+        self._world_combo.setEnabled(False)
         self._start_btn.setText("Starting…")
-        self._sim.start()
+        self._sim.start(world=self._world_combo.currentText())
 
     def _on_sim_ready(self) -> None:
         self._start_btn.setText("Sim Running")
+        self._world_combo.setEnabled(False)

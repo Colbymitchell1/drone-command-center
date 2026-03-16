@@ -8,6 +8,12 @@ from app.events.event_bus import bus
 
 STACK_SCRIPT = "/home/colby/start_px4_stack.sh"
 
+# Home position used by both PX4 SITL and the mission planner map center.
+# Change here to relocate the simulation world — the map will follow automatically.
+SIM_HOME_LAT = 32.9230
+SIM_HOME_LON = -117.2590
+SIM_HOME_ALT = 0.0
+
 
 def _udp_port_in_use(port: int) -> bool:
     """True if any process holds a UDP listen socket on this port.
@@ -62,14 +68,19 @@ class SimController(QObject):
 
     # ── public API ────────────────────────────────────────────────────────────
 
-    def start(self) -> None:
+    def start(self, world: str = "baylands") -> None:
         if self._process and self._process.poll() is None:
             return  # already running
         env = os.environ.copy()
         env["WEBKIT_DISABLE_COMPOSITING_MODE"] = "1"
         env.setdefault("QT_QPA_PLATFORM", "xcb")
+        # Spawn the sim drone at the same coordinates shown on the mission planner map
+        # so that uploaded absolute waypoints match the drone's actual GPS position.
+        env["PX4_HOME_LAT"] = str(SIM_HOME_LAT)
+        env["PX4_HOME_LON"] = str(SIM_HOME_LON)
+        env["PX4_HOME_ALT"] = str(SIM_HOME_ALT)
         self._process = subprocess.Popen(
-            ["bash", STACK_SCRIPT],
+            ["bash", STACK_SCRIPT, world],
             env=env,
             start_new_session=True,  # os.setsid() — own process group, detached from our app
             stdout=subprocess.DEVNULL,

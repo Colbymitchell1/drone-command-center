@@ -16,13 +16,14 @@ from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from app.events.event_bus import bus
+from app.services.sim_controller import SIM_HOME_LAT, SIM_HOME_LON
 from integrations.mavsdk.connector import DroneConnector
 from mission.planning.lawnmower import generate_lawnmower
 
 
 # ── Embedded map HTML ─────────────────────────────────────────────────────────
 
-_MAP_HTML = """<!DOCTYPE html>
+_MAP_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8"/>
@@ -40,7 +41,7 @@ _MAP_HTML = """<!DOCTYPE html>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
   <script>
-    var map = L.map('map').setView([32.923, -117.259], 14);
+    var map = L.map('map').setView([$HOME_LAT, $HOME_LON], 14);
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
@@ -122,6 +123,12 @@ _MAP_HTML = """<!DOCTYPE html>
   </script>
 </body>
 </html>"""
+
+_MAP_HTML = (
+    _MAP_HTML_TEMPLATE
+    .replace("$HOME_LAT", str(SIM_HOME_LAT))
+    .replace("$HOME_LON", str(SIM_HOME_LON))
+)
 
 
 # ── JS→Python bridge ──────────────────────────────────────────────────────────
