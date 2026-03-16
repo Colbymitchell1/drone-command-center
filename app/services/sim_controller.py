@@ -1,3 +1,4 @@
+import os
 import subprocess
 from typing import Optional
 
@@ -64,9 +65,13 @@ class SimController(QObject):
     def start(self) -> None:
         if self._process and self._process.poll() is None:
             return  # already running
+        env = os.environ.copy()
+        env["WEBKIT_DISABLE_COMPOSITING_MODE"] = "1"
+        env.setdefault("QT_QPA_PLATFORM", "xcb")
         self._process = subprocess.Popen(
-            ["bash", "-x", STACK_SCRIPT],
-            start_new_session=True,
+            ["bash", STACK_SCRIPT],
+            env=env,
+            start_new_session=True,  # os.setsid() — own process group, detached from our app
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

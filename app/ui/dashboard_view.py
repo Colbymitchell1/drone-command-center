@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -13,6 +14,8 @@ from app.events.event_bus import bus
 from app.services.sim_controller import SimController
 from app.state.state_store import DroneMode, StateStore
 from integrations.mavsdk.connector import DroneConnector
+from mission.execution.executor import LawnmowerExecutor, MissionStatus
+from app.ui.mission_planner_view import MissionPlannerView
 
 
 # ── shared helpers ────────────────────────────────────────────────────────────
@@ -84,12 +87,12 @@ class TelemetryPanel(QGroupBox):
             if key in data:
                 unit = lbl.property("unit") or ""
                 raw = data[key]
-                # Format floats to a readable precision
+                # Format floats to a readable precision; skip unit for string sentinels
                 if isinstance(raw, float):
                     text = f"{raw:.4f}" if key in ("lat", "lon") else f"{raw:.1f}"
+                    lbl.setText(f"{text}{unit}")
                 else:
-                    text = str(raw)
-                lbl.setText(f"{text}{unit}")
+                    lbl.setText(str(raw))
 
 
 # ── SystemHealthPanel ─────────────────────────────────────────────────────────
@@ -208,6 +211,86 @@ class ConnectPanel(QWidget):
         self._status_lbl.setStyleSheet("color: #f44336; font-size: 12px;")
 
 
+# ── MissionPanel ──────────────────────────────────────────────────────────────
+
+_STATUS_STYLES = {
+    MissionStatus.IDLE:     ("IDLE",     "#888888"),
+    MissionStatus.RUNNING:  ("RUNNING",  "#ff9800"),
+    MissionStatus.COMPLETE: ("COMPLETE", "#4caf50"),
+    MissionStatus.ABORTED:  ("ABORTED",  "#f44336"),
+}
+
+
+class MissionPanel(QGroupBox):
+    def __init__(self, executor: LawnmowerExecutor, parent=None):
+        super().__init__("Mission", parent)
+        self._executor = executor
+        self._build_ui()
+
+        bus.vehicle_connected.connect(self._on_connected)
+        bus.vehicle_disconnected.connect(self._on_disconnected)
+        bus.mission_started.connect(lambda: self._set_status(MissionStatus.RUNNING))
+        bus.mission_completed.connect(lambda: self._set_status(MissionStatus.COMPLETE))
+        bus.mission_aborted.connect(lambda _: self._set_status(MissionStatus.ABORTED))
+
+    def _build_ui(self) -> None:
+        layout = QHBoxLayout(self)
+        layout.setSpacing(12)
+
+        label = QLabel("STATUS:")
+        label.setStyleSheet("color: #888; font-size: 11px; letter-spacing: 1px;")
+        layout.addWidget(label)
+
+        self._status_lbl = QLabel("IDLE")
+        self._status_lbl.setFixedWidth(80)
+        self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_lbl.setStyleSheet(
+            "color: #888888; font-weight: bold; font-size: 13px;"
+            "background: #1e1e1e; border-radius: 4px; padding: 3px 8px;"
+        )
+        layout.addWidget(self._status_lbl)
+
+        layout.addStretch()
+
+        self._start_btn = QPushButton("Start Lawnmower Search")
+        self._start_btn.setFixedWidth(200)
+        self._start_btn.setEnabled(False)
+        self._start_btn.clicked.connect(self._on_start)
+        layout.addWidget(self._start_btn)
+
+        self._abort_btn = QPushButton("Abort")
+        self._abort_btn.setFixedWidth(80)
+        self._abort_btn.setEnabled(False)
+        self._abort_btn.setStyleSheet("color: #f44336;")
+        self._abort_btn.clicked.connect(self._on_abort)
+        layout.addWidget(self._abort_btn)
+
+    def _set_status(self, status: MissionStatus) -> None:
+        text, color = _STATUS_STYLES[status]
+        self._status_lbl.setText(text)
+        self._status_lbl.setStyleSheet(
+            f"color: {color}; font-weight: bold; font-size: 13px;"
+            f"background: #1e1e1e; border-radius: 4px; padding: 3px 8px;"
+        )
+        running = status == MissionStatus.RUNNING
+        self._start_btn.setEnabled(not running)
+        self._abort_btn.setEnabled(running)
+
+    def _on_connected(self) -> None:
+        self._start_btn.setEnabled(True)
+
+    def _on_disconnected(self) -> None:
+        self._start_btn.setEnabled(False)
+        self._abort_btn.setEnabled(False)
+        self._set_status(MissionStatus.IDLE)
+
+    def _on_start(self) -> None:
+        self._executor.start()
+
+    def _on_abort(self) -> None:
+        self._executor.abort()
+
+
 # ── DashboardView ─────────────────────────────────────────────────────────────
 
 class DashboardView(QWidget):
@@ -217,14 +300,22 @@ class DashboardView(QWidget):
         self._state = state
         self._sim = sim_controller
         self._connector = connector
+        self._executor = LawnmowerExecutor(self)
         self._build_ui()
+        self._wire_executor()
+
+    def _wire_executor(self) -> None:
+        bus.vehicle_connected.connect(
+            lambda: self._executor.bind(self._connector.drone, self._connector.loop)
+        )
+        bus.vehicle_disconnected.connect(self._executor.unbind)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 12, 16, 12)
-        root.setSpacing(12)
+        root.setSpacing(8)
 
-        # Header bar
+        # ── always-visible header ─────────────────────────────────────────────
         header = QHBoxLayout()
         mode_badge = QLabel(f"MODE: {self._state.mode.value}")
         mode_badge.setStyleSheet(
@@ -234,25 +325,35 @@ class DashboardView(QWidget):
         self._start_btn.setFixedWidth(160)
         self._start_btn.clicked.connect(self._on_start_sim)
         self._start_btn.setVisible(self._state.mode == DroneMode.SIM)
-
         header.addWidget(mode_badge)
         header.addStretch()
         header.addWidget(self._start_btn)
 
-        # Connect row
         connect_row = ConnectPanel(self._connector)
-
-        # Panel row
-        panels = QHBoxLayout()
-        self._telemetry = TelemetryPanel()
-        self._health = SystemHealthPanel(self._sim)
-        panels.addWidget(self._telemetry, stretch=3)
-        panels.addWidget(self._health, stretch=1)
 
         root.addLayout(header)
         root.addWidget(connect_row)
-        root.addLayout(panels)
-        root.addStretch()
+
+        # ── tab widget ────────────────────────────────────────────────────────
+        tabs = QTabWidget()
+
+        # Tab 0: Overview — telemetry, health, mission execution
+        overview = QWidget()
+        ov = QVBoxLayout(overview)
+        ov.setContentsMargins(0, 8, 0, 0)
+        ov.setSpacing(8)
+        panels = QHBoxLayout()
+        panels.addWidget(TelemetryPanel(), stretch=3)
+        panels.addWidget(SystemHealthPanel(self._sim), stretch=1)
+        ov.addLayout(panels)
+        ov.addWidget(MissionPanel(self._executor))
+        ov.addStretch()
+        tabs.addTab(overview, "Overview")
+
+        # Tab 1: Mission Planner
+        tabs.addTab(MissionPlannerView(self._connector), "Mission Planner")
+
+        root.addWidget(tabs, stretch=1)
 
         # Wire bus events
         bus.sim_started.connect(self._on_sim_ready)

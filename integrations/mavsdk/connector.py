@@ -29,6 +29,14 @@ class DroneConnector(QObject):
 
     # ── public API ────────────────────────────────────────────────────────────
 
+    @property
+    def drone(self) -> Optional[System]:
+        return self._drone
+
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop:
+        return self._loop
+
     def connect(self, port: int = 14540) -> None:
         asyncio.run_coroutine_threadsafe(self._connect(port), self._loop)
 

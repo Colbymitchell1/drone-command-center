@@ -87,6 +87,16 @@ class TelemetryManager:
     async def _stream_battery(self) -> None:
         try:
             async for batt in self._drone.telemetry.battery():
-                self._state["battery"] = round(batt.remaining_percent * 100, 1)
+                raw = batt.remaining_percent
+                if raw < 0:
+                    # Negative sentinel — sim has no real battery model
+                    self._state["battery"] = "SIM"
+                elif raw <= 1.0:
+                    # Normal 0.0–1.0 float from MAVSDK
+                    self._state["battery"] = round(raw * 100, 1)
+                else:
+                    # Already a percentage (0–100); cap at 100 for dummy sim values
+                    pct = min(raw, 100.0)
+                    self._state["battery"] = round(pct, 1)
         except asyncio.CancelledError:
             pass
