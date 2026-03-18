@@ -72,6 +72,16 @@ class UploadedMissionRunner(QObject):
                 if progress.total > 0 and progress.current >= progress.total:
                     break
 
+            # Mission complete — command RTL so the drone returns home and
+            # lands instead of hovering indefinitely at the last waypoint.
+            for attempt in range(3):
+                try:
+                    await drone.action.return_to_launch()
+                    break
+                except Exception:
+                    if attempt < 2:
+                        await asyncio.sleep(0.5)
+
             self._status = MissionStatus.COMPLETE
             bus.mission_completed.emit()
 

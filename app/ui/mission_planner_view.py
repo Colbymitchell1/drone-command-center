@@ -18,7 +18,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from app.events.event_bus import bus
 from app.services.sim_controller import SIM_HOME_LAT, SIM_HOME_LON
 from integrations.mavsdk.connector import DroneConnector
-from mission.planning.lawnmower import generate_lawnmower
+from mission.planning.lawnmower import generate_lawnmower, offsets_to_latlon, polygon_center
 
 
 # ── Embedded map HTML ─────────────────────────────────────────────────────────
@@ -159,7 +159,7 @@ class MissionPlannerView(QWidget):
         super().__init__(parent)
         self._connector = connector
         self._polygon: list = []
-        self._waypoints: list = []
+        self._offsets: list = []   # (north_m, east_m) from polygon centroid
         self._bridge = _MapBridge(self)
 
         self._build_ui()
@@ -229,7 +229,7 @@ class MissionPlannerView(QWidget):
         ctrl_row.addWidget(self._upload_btn)
 
         # Status bar
-        self._status_lbl = QLabel("Draw a search area polygon on the map.")
+        self._status_lbl = QLabel("Draw a search area polygon on the map. Mission will be placed at the drone's position on upload.")
         self._status_lbl.setStyleSheet(
             "color: #888; font-size: 11px; padding: 0 8px;"
         )
@@ -255,10 +255,10 @@ class MissionPlannerView(QWidget):
 
     def _on_clear(self) -> None:
         self._polygon = []
-        self._waypoints = []
+        self._offsets = []
         self._web.page().runJavaScript("clearMap();")
         self._refresh_upload_btn()
-        self._set_status("Draw a search area polygon on the map.")
+        self._set_status("Draw a search area polygon on the map. Mission will be placed at the drone's position on upload.")
 
     def _on_polygon(self, vertices: list) -> None:
         self._polygon = vertices
@@ -276,14 +276,14 @@ class MissionPlannerView(QWidget):
         from mission.planning.uploader import upload_geofence, upload_mission
 
         polygon = [tuple(p) for p in self._polygon]
-        waypoints = list(self._waypoints)
+        offsets = list(self._offsets)
 
         async def _upload():
             await upload_geofence(self._connector.drone, polygon)
-            await upload_mission(self._connector.drone, waypoints)
+            await upload_mission(self._connector.drone, offsets)
 
         self._upload_btn.setEnabled(False)
-        self._set_status("Uploading mission…")
+        self._set_status("Fetching drone position and uploading mission…")
         future = asyncio.run_coroutine_threadsafe(_upload(), self._connector.loop)
         future.add_done_callback(self._on_upload_done)
 
@@ -291,9 +291,9 @@ class MissionPlannerView(QWidget):
         """Called from asyncio thread — emit signal for Qt-thread delivery."""
         try:
             future.result()
-            n = len(self._waypoints)
+            n = len(self._offsets)
             self._upload_result.emit(
-                True, f"Uploaded {n} waypoints + geofence."
+                True, f"Uploaded {n} waypoints + geofence (anchored at drone position)."
             )
         except Exception as e:
             self._upload_result.emit(False, f"Upload failed: {e}")
@@ -310,17 +310,24 @@ class MissionPlannerView(QWidget):
 
     def _generate_and_display(self, spacing_m: int) -> None:
         polygon_tuples = [tuple(p) for p in self._polygon]
-        self._waypoints = generate_lawnmower(polygon_tuples, float(spacing_m))
+        self._offsets = generate_lawnmower(polygon_tuples, float(spacing_m))
+        # Preview on the map uses polygon centroid as a stand-in for drone position.
+        # Actual upload will reanchor at the drone's real GPS position.
+        center = polygon_center(polygon_tuples)
+        preview_wps = offsets_to_latlon(center, self._offsets)
         self._web.page().runJavaScript(
-            f"setWaypoints({json.dumps(self._waypoints)});"
+            f"setWaypoints({json.dumps(preview_wps)});"
         )
-        n = len(self._waypoints)
-        self._set_status(f"{n} waypoints generated  ({spacing_m} m spacing).")
+        n = len(self._offsets)
+        self._set_status(
+            f"{n} waypoints generated  ({spacing_m} m spacing).  "
+            f"Pattern will be anchored at drone position on upload."
+        )
         self._refresh_upload_btn()
 
     def _refresh_upload_btn(self) -> None:
         self._upload_btn.setEnabled(
-            bool(self._waypoints) and self._connector.drone is not None
+            bool(self._offsets) and self._connector.drone is not None
         )
 
     def _set_status(self, msg: str, error: bool = False) -> None:

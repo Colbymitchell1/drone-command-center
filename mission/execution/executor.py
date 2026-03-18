@@ -102,6 +102,7 @@ class LawnmowerExecutor(QObject):
         bus.mission_started.emit()
 
         try:
+            await drone.action.set_takeoff_altitude(10.0)
             await drone.action.arm()
             await drone.action.takeoff()
             await asyncio.sleep(6)
@@ -124,13 +125,16 @@ class LawnmowerExecutor(QObject):
                 await asyncio.sleep(self.SHIFT_TIME)
 
             await drone.offboard.stop()
-            await drone.action.hold()
-            await asyncio.sleep(3)
-            await drone.action.return_to_launch()
 
-            async for in_air in drone.telemetry.in_air():
-                if not in_air:
+            # Pattern complete — RTL with retries so a transient rejection
+            # during the mode transition doesn't leave the drone hovering.
+            for attempt in range(3):
+                try:
+                    await drone.action.return_to_launch()
                     break
+                except Exception:
+                    if attempt < 2:
+                        await asyncio.sleep(0.5)
 
             self._status = MissionStatus.COMPLETE
             bus.mission_completed.emit()

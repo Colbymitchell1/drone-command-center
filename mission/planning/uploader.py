@@ -11,12 +11,14 @@ from mavsdk import System
 from mavsdk.geofence import GeofenceData, Point as GeoPoint, Polygon as GeoPolygon, FenceType
 from mavsdk.mission import MissionItem, MissionPlan
 
+from mission.planning.lawnmower import OffsetM, offsets_to_latlon
+
 LatLon = Tuple[float, float]
 
-_CRUISE_ALT_M = 10.0
-_CRUISE_SPEED_MS = 5.0
+_CRUISE_ALT_M        = 10.0
+_CRUISE_SPEED_MS     = 5.0
 _ACCEPTANCE_RADIUS_M = 2.0   # how close the drone must get before accepting a waypoint
-_LOITER_TIME_S = 0.0         # no pause at waypoints; NaN can stall PX4 indefinitely
+_LOITER_TIME_S       = 0.0   # no pause at waypoints; NaN can stall PX4 indefinitely
 
 
 def _haversine_m(a: LatLon, b: LatLon) -> float:
@@ -31,12 +33,30 @@ def _haversine_m(a: LatLon, b: LatLon) -> float:
 
 async def upload_geofence(drone: System, polygon: List[LatLon]) -> None:
     points = [GeoPoint(lat, lon) for lat, lon in polygon]
-    fence = GeoPolygon(points, FenceType.INCLUSION)
+    fence  = GeoPolygon(points, FenceType.INCLUSION)
     await drone.geofence.upload_geofence(GeofenceData([fence], []))
 
 
-async def upload_mission(drone: System, waypoints: List[LatLon]) -> None:
+async def upload_mission(drone: System, offsets: List[OffsetM]) -> None:
+    """
+    Fetch the drone's current GPS position, place the lawnmower pattern
+    relative to that position, then upload the resulting mission.
+
+    Args:
+        drone:   Connected MAVSDK System.
+        offsets: (north_m, east_m) offsets from generate_lawnmower().
+                 The polygon shape is preserved; only the anchor moves.
+    """
     nan = float("nan")
+
+    # ── anchor pattern at drone's current position ────────────────────────────
+    async for position in drone.telemetry.position():
+        origin: LatLon = (position.latitude_deg, position.longitude_deg)
+        break
+
+    print(f"[uploader] Drone position: lat={origin[0]:.6f}  lon={origin[1]:.6f}")
+
+    waypoints = offsets_to_latlon(origin, offsets)
 
     # ── debug: print waypoint list so spacing can be verified in the console ──
     print(f"[uploader] Uploading {len(waypoints)} waypoints:")

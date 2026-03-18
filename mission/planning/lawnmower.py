@@ -1,7 +1,8 @@
 import math
 from typing import List, Tuple
 
-LatLon = Tuple[float, float]  # (lat, lon)
+LatLon  = Tuple[float, float]   # (lat, lon)
+OffsetM = Tuple[float, float]   # (north_m, east_m) relative to some origin
 
 _METERS_PER_LAT_DEG = 111_320.0
 
@@ -11,17 +12,10 @@ def _meters_per_lon_deg(lat: float) -> float:
 
 
 def _to_local(origin: LatLon, point: LatLon) -> Tuple[float, float]:
-    """Returns (x=east_m, y=north_m) relative to origin."""
-    x = (point[1] - origin[1]) * _meters_per_lon_deg(origin[0])
-    y = (point[0] - origin[0]) * _METERS_PER_LAT_DEG
-    return (x, y)
-
-
-def _to_latlon(origin: LatLon, xy: Tuple[float, float]) -> LatLon:
-    """Convert (x=east_m, y=north_m) back to lat/lon."""
-    lat = origin[0] + xy[1] / _METERS_PER_LAT_DEG
-    lon = origin[1] + xy[0] / _meters_per_lon_deg(origin[0])
-    return (lat, lon)
+    """Returns (east_m, north_m) relative to origin."""
+    east  = (point[1] - origin[1]) * _meters_per_lon_deg(origin[0])
+    north = (point[0] - origin[0]) * _METERS_PER_LAT_DEG
+    return (east, north)
 
 
 def _x_intersections_at_y(polygon_xy: List[Tuple[float, float]], y: float) -> List[float]:
@@ -39,43 +33,77 @@ def _x_intersections_at_y(polygon_xy: List[Tuple[float, float]], y: float) -> Li
     return sorted(xs)
 
 
-def generate_lawnmower(polygon: List[LatLon], spacing_m: float = 20.0) -> List[LatLon]:
-    """
-    Generate boustrophedon (lawnmower) waypoints that cover a polygon.
+def polygon_center(polygon: List[LatLon]) -> LatLon:
+    """Return the centroid of a polygon as (lat, lon)."""
+    lat = sum(p[0] for p in polygon) / len(polygon)
+    lon = sum(p[1] for p in polygon) / len(polygon)
+    return (lat, lon)
 
-    Scans west→east legs spaced spacing_m apart in the north direction,
-    alternating direction each row to form the mowing pattern.
+
+def offsets_to_latlon(origin: LatLon, offsets: List[OffsetM]) -> List[LatLon]:
+    """
+    Place a list of (north_m, east_m) offsets at the given GPS origin.
 
     Args:
-        polygon: Closed polygon as list of (lat, lon) vertices.
+        origin:  (lat, lon) anchor point — e.g. drone's current position.
+        offsets: List of (north_m, east_m) offsets from the polygon centroid
+                 as returned by generate_lawnmower().
+
+    Returns:
+        Absolute (lat, lon) waypoints.
+    """
+    lat0, lon0 = origin
+    result: List[LatLon] = []
+    for north_m, east_m in offsets:
+        lat = lat0 + north_m / _METERS_PER_LAT_DEG
+        lon = lon0 + east_m  / _meters_per_lon_deg(lat0)
+        result.append((lat, lon))
+    return result
+
+
+def generate_lawnmower(polygon: List[LatLon], spacing_m: float = 20.0) -> List[OffsetM]:
+    """
+    Generate boustrophedon (lawnmower) waypoints covering a polygon.
+
+    Returns waypoints as (north_m, east_m) metre offsets relative to the
+    polygon centroid — NOT absolute lat/lon.  This separates pattern shape
+    from GPS placement so the same pattern can be re-anchored anywhere.
+
+    Call offsets_to_latlon(origin, offsets) to place the pattern at any
+    GPS coordinate (e.g. the drone's current position at upload time).
+
+    Args:
+        polygon:   Closed polygon as list of (lat, lon) vertices.
         spacing_m: Distance between parallel legs in metres.
 
     Returns:
-        Ordered list of (lat, lon) waypoints.
+        Ordered list of (north_m, east_m) offsets from the polygon centroid.
     """
     if len(polygon) < 3:
         return []
 
-    origin = polygon[0]
-    local = [_to_local(origin, p) for p in polygon]
+    center = polygon_center(polygon)
+    # Convert polygon to local (east_m, north_m) coordinates centred on the centroid.
+    # _to_local returns (east_m, north_m), so index 0 = east, index 1 = north.
+    local = [_to_local(center, p) for p in polygon]
 
-    y_vals = [p[1] for p in local]
+    y_vals = [p[1] for p in local]   # north values
     y_min, y_max = min(y_vals), max(y_vals)
 
-    waypoints_local: List[Tuple[float, float]] = []
+    offsets: List[OffsetM] = []
     y = y_min + spacing_m / 2
     leg = 0
 
     while y <= y_max:
-        xs = _x_intersections_at_y(local, y)
-        # Pair up entry/exit intersections
+        xs = _x_intersections_at_y(local, y)   # east values at this north scanline
         for i in range(0, len(xs) - 1, 2):
             x_start, x_end = xs[i], xs[i + 1]
             if leg % 2 == 0:
-                waypoints_local.extend([(x_start, y), (x_end, y)])
+                offsets.extend([(y, x_start), (y, x_end)])
             else:
-                waypoints_local.extend([(x_end, y), (x_start, y)])
+                offsets.extend([(y, x_end), (y, x_start)])
             leg += 1
         y += spacing_m
 
-    return [_to_latlon(origin, wp) for wp in waypoints_local]
+    # Each entry is (north_m, east_m) from the polygon centroid.
+    return offsets
