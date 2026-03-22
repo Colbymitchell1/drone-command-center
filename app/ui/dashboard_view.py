@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.events.event_bus import bus
+from app.services.battery_monitor import BatteryMonitor
 from app.services.sim_controller import SimController
 from app.state.state_store import DroneMode, StateStore
 from integrations.mavsdk.connector import DroneConnector
@@ -215,6 +216,68 @@ class ConnectPanel(QWidget):
         self._port_input.setEnabled(True)
         self._status_lbl.setText(f"Error: {msg}")
         self._status_lbl.setStyleSheet("color: #f44336; font-size: 12px;")
+
+
+# ── MissionPanel ──────────────────────────────────────────────────────────────
+
+# ── BatteryBanner ─────────────────────────────────────────────────────────────
+
+class BatteryBanner(QWidget):
+    """
+    A single-line alert bar that appears below the telemetry panel when
+    battery_warning or battery_critical fires.  Hidden when battery is normal
+    or the vehicle is disconnected.
+    """
+
+    _WARN_STYLE = (
+        "background: #3a2d00; border-radius: 4px; padding: 4px 10px;"
+    )
+    _CRIT_STYLE = (
+        "background: #3a1010; border-radius: 4px; padding: 4px 10px;"
+    )
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(8)
+
+        self._icon = QLabel("⚠")
+        self._text = QLabel()
+        self._text.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self._icon)
+        layout.addWidget(self._text, stretch=1)
+
+        bus.battery_warning.connect(self._on_warning)
+        bus.battery_critical.connect(self._on_critical)
+        bus.vehicle_disconnected.connect(self.hide)
+        self.hide()
+
+    def _on_warning(self, pct: float) -> None:
+        self._icon.setStyleSheet(
+            "font-size: 15px; font-weight: bold; color: #ffc107;"
+        )
+        self._text.setStyleSheet(
+            "font-size: 13px; font-weight: bold; color: #ffc107;"
+        )
+        self._text.setText(
+            f"Low battery ({pct:.0f}%) — consider aborting mission"
+        )
+        self.setStyleSheet(self._WARN_STYLE)
+        self.show()
+
+    def _on_critical(self, pct: float) -> None:
+        self._icon.setStyleSheet(
+            "font-size: 15px; font-weight: bold; color: #f44336;"
+        )
+        self._text.setStyleSheet(
+            "font-size: 13px; font-weight: bold; color: #f44336;"
+        )
+        self._text.setText(
+            f"Critical battery ({pct:.0f}%) — returning to home"
+        )
+        self.setStyleSheet(self._CRIT_STYLE)
+        self.show()
 
 
 # ── MissionPanel ──────────────────────────────────────────────────────────────
@@ -444,6 +507,7 @@ class DashboardView(QWidget):
         self._connector = connector
         self._executor = LawnmowerExecutor(self)
         self._runner = UploadedMissionRunner(self)
+        self._battery_monitor = BatteryMonitor(self)
         self._build_ui()
         self._wire_executors()
 
@@ -503,6 +567,7 @@ class DashboardView(QWidget):
         panels.addWidget(TelemetryPanel(), stretch=3)
         panels.addWidget(SystemHealthPanel(self._sim), stretch=1)
         ov.addLayout(panels)
+        ov.addWidget(BatteryBanner())
         ov.addWidget(
             MissionPanel(self._executor, self._runner, self._connector, self._planner)
         )

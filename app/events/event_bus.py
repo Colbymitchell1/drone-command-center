@@ -23,6 +23,10 @@ class EventBus(QObject):
     mission_completed = Signal()
     mission_aborted = Signal(str)       # reason string
 
+    # Battery
+    battery_warning = Signal(float)     # pct — dropped below WARNING_PCT
+    battery_critical = Signal(float)    # pct — dropped below CRITICAL_PCT
+
     # Autonomy / safety
     target_detected = Signal(dict)
     return_to_home_triggered = Signal()

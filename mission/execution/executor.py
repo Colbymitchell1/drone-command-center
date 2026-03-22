@@ -38,6 +38,11 @@ class LawnmowerExecutor(QObject):
         self._drone: Optional[System] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._future: Optional[asyncio.Future] = None
+        self._abort_reason: Optional[str] = None
+
+        # Hard failsafe — battery_critical always triggers abort regardless of
+        # operator input.  Not overridable.
+        bus.battery_critical.connect(self._on_battery_critical)
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -66,6 +71,11 @@ class LawnmowerExecutor(QObject):
     def abort(self) -> None:
         if self._future and not self._future.done() and self._loop:
             self._loop.call_soon_threadsafe(self._future.cancel)
+
+    def _on_battery_critical(self, pct: float) -> None:
+        if self._status == MissionStatus.RUNNING:
+            self._abort_reason = f"Battery critical ({pct:.0f}%) — RTB"
+            self.abort()
 
     @classmethod
     def get_path_offsets(cls) -> list:
@@ -166,7 +176,9 @@ class LawnmowerExecutor(QObject):
             except Exception:
                 pass
             self._status = MissionStatus.ABORTED
-            bus.mission_aborted.emit("Operator abort — RTB")
+            reason = self._abort_reason or "Operator abort — RTB"
+            self._abort_reason = None
+            bus.mission_aborted.emit(reason)
 
         except OffboardError as e:
             try:
