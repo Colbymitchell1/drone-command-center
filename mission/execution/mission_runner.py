@@ -77,8 +77,13 @@ class UploadedMissionRunner(QObject):
             await drone.mission.start_mission()
 
             # Monitor progress until all items are visited.
-            # current reaches total when the last waypoint is completed.
+            # Emit waypoint_advanced each time progress.current advances so
+            # the map can highlight the active target and shade completed segments.
+            last_wp = -1
             async for progress in drone.mission.mission_progress():
+                if progress.current != last_wp:
+                    last_wp = progress.current
+                    bus.waypoint_advanced.emit(progress.current)
                 if progress.total > 0 and progress.current >= progress.total:
                     break
 

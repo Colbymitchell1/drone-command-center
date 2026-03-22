@@ -22,6 +22,7 @@ class EventBus(QObject):
     mission_started = Signal()
     mission_completed = Signal()
     mission_aborted = Signal(str)       # reason string
+    waypoint_advanced = Signal(int)     # progress.current — index of next target waypoint
 
     # Battery
     battery_warning = Signal(float)     # pct — dropped below WARNING_PCT

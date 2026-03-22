@@ -48,11 +48,21 @@ _MAP_HTML_TEMPLATE = """<!DOCTYPE html>
       maxZoom: 19
     }).addTo(map);
 
-    var drawnItems   = new L.FeatureGroup().addTo(map);
-    var waypointLayer = L.layerGroup().addTo(map);
-    var drawHandler  = null;
-    var bridge       = null;
+    // ── Layer groups — order determines z-order (later = on top) ─────────────
+    var drawnItems    = new L.FeatureGroup().addTo(map);  // polygon
+    var waypointLayer = L.layerGroup().addTo(map);        // planned path + markers
+    var completedLayer = L.layerGroup().addTo(map);       // flown segments overlay
+    var droneLayer    = L.layerGroup().addTo(map);        // live drone position
 
+    var drawHandler = null;
+    var bridge      = null;
+
+    // Mission state
+    var waypointMarkers = [];   // L.Marker per waypoint, indexed to match wps[]
+    var currentWps      = [];   // last wps array passed to setWaypoints
+    var droneMarker     = null; // single live-position marker
+
+    // ── Draw control ──────────────────────────────────────────────────────────
     var drawControl = new L.Control.Draw({
       draw: {
         polygon:      { allowIntersection: false, showArea: true },
@@ -75,7 +85,60 @@ _MAP_HTML_TEMPLATE = """<!DOCTYPE html>
       if (bridge) bridge.polygonDrawn(JSON.stringify(verts));
     });
 
-    // ── functions called from Python via runJavaScript ────────────────────────
+    // ── Icon factories ────────────────────────────────────────────────────────
+
+    // Numbered circle for regular waypoints
+    function _wpIcon(label, color) {
+      return L.divIcon({
+        html: '<div style="background:' + color + ';color:#fff;border-radius:50%;'
+            + 'width:18px;height:18px;line-height:18px;text-align:center;'
+            + 'font-size:9px;font-weight:bold;">' + label + '</div>',
+        iconSize: [18, 18],
+        iconAnchor: [9, 9],
+        className: ''
+      });
+    }
+
+    // House icon for the start/home waypoint (index 0)
+    function _homeIcon(color) {
+      return L.divIcon({
+        html: '<div style="background:' + color + ';color:#fff;border-radius:3px;'
+            + 'width:22px;height:22px;line-height:22px;text-align:center;'
+            + 'font-size:14px;box-shadow:0 0 3px rgba(0,0,0,0.5);">&#8962;</div>',
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+        className: ''
+      });
+    }
+
+    // Small directional arrow placed at segment midpoints
+    function _arrowIcon(bearing) {
+      return L.divIcon({
+        html: '<div style="transform:rotate(' + bearing + 'deg);'
+            + 'color:#2196F3;font-size:10px;width:12px;height:12px;'
+            + 'line-height:12px;text-align:center;opacity:0.85;">&#9650;</div>',
+        iconSize: [12, 12],
+        iconAnchor: [6, 6],
+        className: ''
+      });
+    }
+
+    // Drone marker: SVG arrow pointing north, rotated by heading via CSS transform
+    function _droneIcon(heading) {
+      return L.divIcon({
+        html: '<div style="width:26px;height:26px;">'
+            + '<svg style="transform:rotate(' + heading + 'deg);'
+            + 'transform-origin:center center;" width="26" height="26" viewBox="0 0 26 26">'
+            + '<polygon points="13,2 21,24 13,18 5,24" '
+            + 'fill="#00BCD4" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/>'
+            + '</svg></div>',
+        iconSize: [26, 26],
+        iconAnchor: [13, 13],
+        className: ''
+      });
+    }
+
+    // ── Functions called from Python via runJavaScript ────────────────────────
 
     function startDraw() {
       if (drawHandler) drawHandler.disable();
@@ -83,32 +146,106 @@ _MAP_HTML_TEMPLATE = """<!DOCTYPE html>
       drawHandler.enable();
     }
 
+    // Draw the planned flight path with direction arrows, a home marker at
+    // index 0, and numbered circles for the remaining waypoints.
+    // wps is a JS array of [lat, lon] pairs — do NOT JSON.parse it.
     function setWaypoints(wps) {
-      // wps is already a JS array passed directly from Python via runJavaScript —
-      // do NOT call JSON.parse on it.
       waypointLayer.clearLayers();
+      completedLayer.clearLayers();
+      waypointMarkers = [];
+      currentWps = wps ? wps.slice() : [];
+
       if (!wps || wps.length < 2) return;
 
-      L.polyline(wps, { color: '#2196F3', weight: 1.5, opacity: 0.8 })
+      // Planned path line
+      L.polyline(wps, { color: '#2196F3', weight: 2, opacity: 0.75 })
        .addTo(waypointLayer);
 
-      wps.forEach(function(wp, i) {
-        L.marker(wp, {
-          icon: L.divIcon({
-            html: '<div style="background:#2196F3;color:#fff;border-radius:50%;'
-                + 'width:18px;height:18px;line-height:18px;text-align:center;'
-                + 'font-size:9px;font-weight:bold;">' + (i + 1) + '</div>',
-            iconSize: [18, 18],
-            iconAnchor: [9, 9],
-            className: ''
-          })
+      // Direction arrow at the midpoint of each segment
+      for (var i = 0; i < wps.length - 1; i++) {
+        var midLat  = (wps[i][0] + wps[i+1][0]) / 2;
+        var midLon  = (wps[i][1] + wps[i+1][1]) / 2;
+        var dLat    = wps[i+1][0] - wps[i][0];
+        var dLon    = wps[i+1][1] - wps[i][1];
+        // atan2(dLon, dLat) gives bearing clockwise from north — matches CSS rotate
+        var bearing = Math.atan2(dLon, dLat) * 180 / Math.PI;
+        L.marker([midLat, midLon], {
+          icon: _arrowIcon(bearing),
+          interactive: false
         }).addTo(waypointLayer);
+      }
+
+      // Waypoint markers: home icon for index 0, numbered circles for the rest
+      wps.forEach(function(wp, i) {
+        var icon = (i === 0) ? _homeIcon('#4caf50') : _wpIcon(i, '#2196F3');
+        var m = L.marker(wp, { icon: icon }).addTo(waypointLayer);
+        waypointMarkers.push(m);
       });
     }
 
+    // Highlight the current target waypoint in orange.
+    // Called each time progress.current advances during a mission.
+    function setActiveWaypoint(index) {
+      if (waypointMarkers.length === 0 || index < 0 || index >= waypointMarkers.length) return;
+      waypointMarkers[index].setIcon(
+        index === 0 ? _homeIcon('#ff9800') : _wpIcon(index, '#ff9800')
+      );
+    }
+
+    // Mark a waypoint as completed: grey the marker and draw a grey overlay
+    // segment from that waypoint to the next, showing coverage progress.
+    function markWaypointComplete(index) {
+      if (index >= 0 && index < waypointMarkers.length) {
+        waypointMarkers[index].setIcon(
+          index === 0 ? _homeIcon('#616161') : _wpIcon(index, '#616161')
+        );
+      }
+      // Overlay the completed segment (index → index+1) in grey on top of the blue path
+      if (index >= 0 && index + 1 < currentWps.length) {
+        L.polyline([currentWps[index], currentWps[index + 1]], {
+          color: '#9e9e9e', weight: 3, opacity: 0.8
+        }).addTo(completedLayer);
+      }
+    }
+
+    // Reset waypoint markers to their original colours and clear completed overlays.
+    // Called on mission complete, abort, or when a new mission starts.
+    function clearMissionState() {
+      completedLayer.clearLayers();
+      waypointMarkers.forEach(function(m, i) {
+        m.setIcon(i === 0 ? _homeIcon('#4caf50') : _wpIcon(i, '#2196F3'));
+      });
+    }
+
+    // Update (or create) the live drone position marker.
+    // heading is degrees clockwise from north — applied as a CSS rotation.
+    function updateDroneMarker(lat, lon, heading) {
+      var icon = _droneIcon(heading);
+      if (!droneMarker) {
+        droneMarker = L.marker([lat, lon], { icon: icon, zIndexOffset: 1000 });
+        droneMarker.addTo(droneLayer);
+      } else {
+        droneMarker.setLatLng([lat, lon]);
+        droneMarker.setIcon(icon);
+      }
+    }
+
+    // Remove the drone marker (called on vehicle disconnect).
+    function hideDroneMarker() {
+      if (droneMarker) {
+        droneLayer.removeLayer(droneMarker);
+        droneMarker = null;
+      }
+    }
+
+    // Clear polygon, planned path, and completed overlays.
+    // Drone marker is intentionally preserved — it reflects live vehicle state.
     function clearMap() {
       drawnItems.clearLayers();
       waypointLayer.clearLayers();
+      completedLayer.clearLayers();
+      waypointMarkers = [];
+      currentWps = [];
     }
 
     function setCenter(lat, lon) {
@@ -116,7 +253,6 @@ _MAP_HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     // ── QWebChannel bridge setup ──────────────────────────────────────────────
-
     new QWebChannel(qt.webChannelTransport, function(channel) {
       bridge = channel.objects.bridge;
     });
@@ -150,6 +286,11 @@ class MissionPlannerView(QWidget):
     pattern generation, and MAVSDK geofence + mission upload.
 
     Map logic lives entirely in HTML/JS. Python owns geometry and upload.
+
+    Live features:
+    - Drone marker updated from bus.telemetry_updated at 4 Hz
+    - Active waypoint highlighted via bus.waypoint_advanced
+    - Completed path segments overlaid as drone progresses through mission
     """
 
     # Emitted from asyncio thread, delivered on Qt main thread via queued conn.
@@ -166,8 +307,20 @@ class MissionPlannerView(QWidget):
 
         self._bridge.polygon_received.connect(self._on_polygon)
         self._upload_result.connect(self._on_upload_result)
+
+        # Upload button enablement
         bus.vehicle_connected.connect(self._refresh_upload_btn)
         bus.vehicle_disconnected.connect(self._refresh_upload_btn)
+
+        # Live drone marker
+        bus.telemetry_updated.connect(self._on_telemetry_map)
+        bus.vehicle_disconnected.connect(self._on_vehicle_disconnected_map)
+
+        # Mission state on map
+        bus.mission_started.connect(self._on_mission_started_map)
+        bus.mission_completed.connect(self._on_mission_ended_map)
+        bus.mission_aborted.connect(lambda _: self._on_mission_ended_map())
+        bus.waypoint_advanced.connect(self._on_waypoint_advanced)
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -229,17 +382,18 @@ class MissionPlannerView(QWidget):
         ctrl_row.addWidget(self._upload_btn)
 
         # Status bar
-        self._status_lbl = QLabel("Draw a search area polygon on the map. Mission will be placed at the drone's position on upload.")
-        self._status_lbl.setStyleSheet(
-            "color: #888; font-size: 11px; padding: 0 8px;"
+        self._status_lbl = QLabel(
+            "Draw a search area polygon on the map. "
+            "Mission will be placed at the drone's position on upload."
         )
+        self._status_lbl.setStyleSheet("color: #888; font-size: 11px; padding: 0 8px;")
 
         root.addLayout(loc_row)
         root.addWidget(self._web, stretch=1)
         root.addWidget(ctrl_box)
         root.addWidget(self._status_lbl)
 
-    # ── slots ─────────────────────────────────────────────────────────────────
+    # ── planning slots ────────────────────────────────────────────────────────
 
     def _on_go(self) -> None:
         text = self._loc_input.text().strip()
@@ -258,7 +412,10 @@ class MissionPlannerView(QWidget):
         self._offsets = []
         self._web.page().runJavaScript("clearMap();")
         self._refresh_upload_btn()
-        self._set_status("Draw a search area polygon on the map. Mission will be placed at the drone's position on upload.")
+        self._set_status(
+            "Draw a search area polygon on the map. "
+            "Mission will be placed at the drone's position on upload."
+        )
 
     def _on_polygon(self, vertices: list) -> None:
         self._polygon = vertices
@@ -306,13 +463,47 @@ class MissionPlannerView(QWidget):
         else:
             self._refresh_upload_btn()
 
+    # ── live map slots ────────────────────────────────────────────────────────
+
+    def _on_telemetry_map(self, data: dict) -> None:
+        """Update drone position marker on every telemetry tick (4 Hz)."""
+        lat     = data.get("lat")
+        lon     = data.get("lon")
+        heading = data.get("heading")
+        if isinstance(lat, float) and isinstance(lon, float) and isinstance(heading, float):
+            self._web.page().runJavaScript(
+                f"updateDroneMarker({lat}, {lon}, {heading});"
+            )
+
+    def _on_vehicle_disconnected_map(self) -> None:
+        self._web.page().runJavaScript("hideDroneMarker();")
+
+    def _on_mission_started_map(self) -> None:
+        """Reset any leftover mission state and highlight the first waypoint."""
+        self._web.page().runJavaScript("clearMissionState();")
+        self._web.page().runJavaScript("setActiveWaypoint(0);")
+
+    def _on_mission_ended_map(self) -> None:
+        """Restore all waypoint markers to their resting colours on finish/abort."""
+        self._web.page().runJavaScript("clearMissionState();")
+
+    def _on_waypoint_advanced(self, index: int) -> None:
+        """
+        progress.current advanced — 'index' is the next waypoint we're flying toward.
+        Highlight it orange and shade the segment just completed.
+        """
+        self._web.page().runJavaScript(f"setActiveWaypoint({index});")
+        if index > 0:
+            # Mark the waypoint we just left as complete; draw the flown segment
+            self._web.page().runJavaScript(f"markWaypointComplete({index - 1});")
+
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _generate_and_display(self, spacing_m: int) -> None:
         polygon_tuples = [tuple(p) for p in self._polygon]
         self._offsets = generate_lawnmower(polygon_tuples, float(spacing_m))
-        # Preview on the map uses polygon centroid as a stand-in for drone position.
-        # Actual upload will reanchor at the drone's real GPS position.
+        # Preview uses polygon centroid as a stand-in for drone position.
+        # Actual upload will re-anchor at the drone's real GPS position.
         center = polygon_center(polygon_tuples)
         preview_wps = offsets_to_latlon(center, self._offsets)
         self._web.page().runJavaScript(
