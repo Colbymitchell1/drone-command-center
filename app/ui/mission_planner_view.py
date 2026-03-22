@@ -330,6 +330,18 @@ class MissionPlannerView(QWidget):
             bool(self._offsets) and self._connector.drone is not None
         )
 
+    # ── public accessors (used by MissionPanel for preflight) ─────────────────
+
+    @property
+    def offsets(self) -> list:
+        """Current (north_m, east_m) offset list from the drawn polygon."""
+        return list(self._offsets)
+
+    @property
+    def spacing_m(self) -> float:
+        """Current leg spacing in metres."""
+        return float(self._spacing_spin.value())
+
     def _set_status(self, msg: str, error: bool = False) -> None:
         color = "#f44336" if error else "#888"
         self._status_lbl.setStyleSheet(

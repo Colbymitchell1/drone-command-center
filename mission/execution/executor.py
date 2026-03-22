@@ -67,6 +67,26 @@ class LawnmowerExecutor(QObject):
         if self._future and not self._future.done() and self._loop:
             self._loop.call_soon_threadsafe(self._future.cancel)
 
+    @classmethod
+    def get_path_offsets(cls) -> list:
+        """
+        Return the theoretical flight path as a list of (north_m, east_m) offset
+        pairs relative to the launch position.
+
+        Mirrors the velocity-command sequence in _run() so the preflight checker
+        can estimate total distance, flight time, and battery drain before launch.
+        """
+        offsets = [(0.0, 0.0)]
+        north = 0.0
+        east  = 0.0
+        for i in range(cls.NUM_LEGS):
+            direction = 1.0 if i % 2 == 0 else -1.0
+            north += direction * cls.LEG_SPEED * cls.LEG_TIME
+            offsets.append((north, east))
+            east += cls.SHIFT_SPEED * cls.SHIFT_TIME
+            offsets.append((north, east))
+        return offsets
+
     # ── internal helpers ──────────────────────────────────────────────────────
 
     async def _abort_rtl(self, drone: System) -> None:
