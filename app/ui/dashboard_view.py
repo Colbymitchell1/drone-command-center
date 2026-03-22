@@ -49,6 +49,30 @@ def _apply_status(lbl: QLabel, ok: bool | None) -> None:
     )
 
 
+# ── TelemetryPanel helpers ────────────────────────────────────────────────────
+
+# Maps raw FlightMode enum name → operator-facing display string
+_MODE_DISPLAY: dict[str, str] = {
+    "RETURN_TO_LAUNCH": "RTL",
+    "UNKNOWN":          "---",
+}
+
+# Maps raw FlightMode enum name → (text colour, background colour)
+_MODE_COLORS: dict[str, tuple[str, str]] = {
+    "MISSION":          ("#2196F3", "#0d2a40"),
+    "HOLD":             ("#ffc107", "#3a2d00"),
+    "RETURN_TO_LAUNCH": ("#ff9800", "#3a1e00"),
+    "LAND":             ("#ff9800", "#3a1e00"),
+    "OFFBOARD":         ("#ce93d8", "#2d0f40"),
+    "TAKEOFF":          ("#4caf50", "#1b3a1f"),
+}
+_MODE_COLOR_DEFAULT = ("#888888", "#1e1e1e")
+
+_BADGE_BASE = (
+    "font-weight: bold; font-size: 11px; border-radius: 8px; padding: 2px 10px;"
+)
+
+
 # ── TelemetryPanel ────────────────────────────────────────────────────────────
 
 class TelemetryPanel(QGroupBox):
@@ -68,8 +92,13 @@ class TelemetryPanel(QGroupBox):
         bus.telemetry_updated.connect(self._on_telemetry)
 
     def _build_ui(self) -> None:
-        layout = QHBoxLayout(self)
-        layout.setSpacing(24)
+        root = QVBoxLayout(self)
+        root.setSpacing(6)
+        root.setContentsMargins(8, 8, 8, 8)
+
+        # ── Row 1: numeric telemetry values ───────────────────────────────────
+        values_row = QHBoxLayout()
+        values_row.setSpacing(24)
 
         for key, display_name, unit in self._FIELDS:
             col = QVBoxLayout()
@@ -87,7 +116,33 @@ class TelemetryPanel(QGroupBox):
             self._value_labels[key] = val_lbl
             col.addWidget(name_lbl)
             col.addWidget(val_lbl)
-            layout.addLayout(col)
+            values_row.addLayout(col)
+
+        root.addLayout(values_row)
+
+        # ── Row 2: armed/disarmed + flight mode badges ─────────────────────────
+        badges_row = QHBoxLayout()
+        badges_row.setSpacing(8)
+        badges_row.setContentsMargins(4, 0, 4, 0)
+
+        self._armed_badge = QLabel("DISARMED")
+        self._armed_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._armed_badge.setFixedWidth(82)
+        self._armed_badge.setStyleSheet(
+            f"color: #888888; background: #1e1e1e; {_BADGE_BASE}"
+        )
+        badges_row.addWidget(self._armed_badge)
+
+        self._mode_badge = QLabel("---")
+        self._mode_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._mode_badge.setFixedWidth(82)
+        self._mode_badge.setStyleSheet(
+            f"color: #888888; background: #1e1e1e; {_BADGE_BASE}"
+        )
+        badges_row.addWidget(self._mode_badge)
+
+        badges_row.addStretch()
+        root.addLayout(badges_row)
 
     def _on_telemetry(self, data: dict) -> None:
         for key, lbl in self._value_labels.items():
@@ -100,6 +155,32 @@ class TelemetryPanel(QGroupBox):
                     lbl.setText(f"{text}{unit}")
                 else:
                     lbl.setText(str(raw))
+
+        if "armed" in data and data["armed"] is not None:
+            self._update_armed_badge(data["armed"])
+
+        if "flight_mode" in data and data["flight_mode"] is not None:
+            self._update_mode_badge(data["flight_mode"])
+
+    def _update_armed_badge(self, armed: bool) -> None:
+        if armed:
+            self._armed_badge.setText("ARMED")
+            self._armed_badge.setStyleSheet(
+                f"color: #4caf50; background: #1b3a1f; {_BADGE_BASE}"
+            )
+        else:
+            self._armed_badge.setText("DISARMED")
+            self._armed_badge.setStyleSheet(
+                f"color: #888888; background: #1e1e1e; {_BADGE_BASE}"
+            )
+
+    def _update_mode_badge(self, raw_mode: str) -> None:
+        display = _MODE_DISPLAY.get(raw_mode, raw_mode)
+        text_color, bg_color = _MODE_COLORS.get(raw_mode, _MODE_COLOR_DEFAULT)
+        self._mode_badge.setText(display)
+        self._mode_badge.setStyleSheet(
+            f"color: {text_color}; background: {bg_color}; {_BADGE_BASE}"
+        )
 
 
 # ── SystemHealthPanel ─────────────────────────────────────────────────────────

@@ -26,22 +26,26 @@ class TelemetryManager:
         self._loop = loop
         self._tasks: list[asyncio.Task] = []
         self._state: dict = {
-            "lat":     None,
-            "lon":     None,
-            "alt":     None,
-            "speed":   None,
-            "heading": None,
-            "battery": None,
+            "lat":         None,
+            "lon":         None,
+            "alt":         None,
+            "speed":       None,
+            "heading":     None,
+            "battery":     None,
+            "flight_mode": None,   # FlightMode enum name string e.g. "MISSION", "RTL"
+            "armed":       None,   # bool
         }
 
     def start(self) -> None:
         """Schedule all stream tasks. Must be called from within the asyncio loop thread."""
         self._tasks = [
-            self._loop.create_task(self._stream_position(),  name="telem-position"),
-            self._loop.create_task(self._stream_velocity(),  name="telem-velocity"),
-            self._loop.create_task(self._stream_attitude(),  name="telem-attitude"),
-            self._loop.create_task(self._stream_battery(),   name="telem-battery"),
-            self._loop.create_task(self._publish_loop(),     name="telem-publish"),
+            self._loop.create_task(self._stream_position(),    name="telem-position"),
+            self._loop.create_task(self._stream_velocity(),    name="telem-velocity"),
+            self._loop.create_task(self._stream_attitude(),    name="telem-attitude"),
+            self._loop.create_task(self._stream_battery(),     name="telem-battery"),
+            self._loop.create_task(self._stream_flight_mode(), name="telem-flight-mode"),
+            self._loop.create_task(self._stream_armed(),       name="telem-armed"),
+            self._loop.create_task(self._publish_loop(),       name="telem-publish"),
         ]
 
     def stop(self) -> None:
@@ -98,5 +102,20 @@ class TelemetryManager:
                     # Already a percentage (0–100); cap at 100 for dummy sim values
                     pct = min(raw, 100.0)
                     self._state["battery"] = round(pct, 1)
+        except asyncio.CancelledError:
+            pass
+
+    async def _stream_flight_mode(self) -> None:
+        try:
+            async for mode in self._drone.telemetry.flight_mode():
+                # Store the raw enum name; the UI layer maps to display text and colour
+                self._state["flight_mode"] = mode.name
+        except asyncio.CancelledError:
+            pass
+
+    async def _stream_armed(self) -> None:
+        try:
+            async for armed in self._drone.telemetry.armed():
+                self._state["armed"] = armed
         except asyncio.CancelledError:
             pass
