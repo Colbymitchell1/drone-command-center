@@ -10,11 +10,27 @@ real hardware).
 
 Constants at the top of this file are the only place thresholds
 need to be changed.
+
+──────────────────────────────────────────────────────────────────────────────
+SIM MODE SUPPRESSION
+──────────────────────────────────────────────────────────────────────────────
+Battery thresholds are production safety features designed for real hardware.
+PX4 SITL does not model battery discharge accurately — it may report a fixed
+value, a slowly drifting value, or -1 depending on the world and plugin
+configuration.  Acting on those readings in simulation would cause spurious
+battery_warning / battery_critical events that abort simulated missions and
+train the operator to ignore real alerts.
+
+For these reasons, all threshold checks are suppressed when the mode is SIM.
+The monitor stays subscribed and can be switched to enforcement at any time
+by changing the mode to REAL — no restart required.
+──────────────────────────────────────────────────────────────────────────────
 """
 
 from PySide6.QtCore import QObject
 
 from app.events.event_bus import bus
+from app.state.state_store import DroneMode, StateStore
 
 # ── Thresholds — tune here for different vehicles ─────────────────────────────
 
@@ -27,12 +43,16 @@ class BatteryMonitor(QObject):
     Watches battery percentage on every telemetry tick and emits bus signals
     when thresholds are crossed.
 
+    In SIM mode all checks are silently skipped (see module docstring).
+    In REAL mode full threshold enforcement with hysteresis applies.
+
     Instantiate once after the dashboard is created.  The monitor is passive —
     it never commands the drone; that is the executor's responsibility.
     """
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, state: StateStore, parent=None) -> None:
         super().__init__(parent)
+        self._state = state
         self._warn_active:     bool = False   # True while battery < WARNING_PCT
         self._critical_active: bool = False   # True while battery < CRITICAL_PCT
 
@@ -42,9 +62,14 @@ class BatteryMonitor(QObject):
     # ── slots ─────────────────────────────────────────────────────────────────
 
     def _on_telemetry(self, data: dict) -> None:
+        # Suppress entirely in SIM mode — simulator battery readings are not
+        # reliable enough to drive safety-critical alerts.
+        if self._state.mode == DroneMode.SIM:
+            return
+
         raw = data.get("battery")
 
-        # Skip simulation sentinel and missing values
+        # Skip missing values and the SIM sentinel string
         if raw is None or not isinstance(raw, (int, float)):
             return
 

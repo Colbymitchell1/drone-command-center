@@ -507,7 +507,7 @@ class DashboardView(QWidget):
         self._connector = connector
         self._executor = LawnmowerExecutor(self)
         self._runner = UploadedMissionRunner(self)
-        self._battery_monitor = BatteryMonitor(self)
+        self._battery_monitor = BatteryMonitor(self._state, self)
         self._build_ui()
         self._wire_executors()
 
