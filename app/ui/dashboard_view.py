@@ -1,4 +1,7 @@
 import asyncio
+import time
+from pathlib import Path
+from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -10,6 +13,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -577,20 +581,33 @@ class MissionPanel(QGroupBox):
     _mission_uploaded = False
 
 
+_REPORTS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "reports"
+
+
 # ── DashboardView ─────────────────────────────────────────────────────────────
 
 class DashboardView(QWidget):
+    _report_ready = Signal(str)
+
     def __init__(self, state: StateStore, sim_controller: SimController,
-                 connector: DroneConnector, parent=None):
+                 connector: DroneConnector, ai_service=None, parent=None):
         super().__init__(parent)
         self._state = state
         self._sim = sim_controller
         self._connector = connector
+        self._ai_service = ai_service
         self._executor = LawnmowerExecutor(self)
         self._runner = UploadedMissionRunner(self)
         self._battery_monitor = BatteryMonitor(self._state, self)
+        self._last_telemetry: dict = {}
+        self._mission_start_time: Optional[float] = None
         self._build_ui()
         self._wire_executors()
+
+        bus.telemetry_updated.connect(self._on_telemetry_snapshot)
+        bus.mission_started.connect(self._on_mission_started_for_report)
+        bus.mission_completed.connect(self._on_mission_completed)
+        self._report_ready.connect(self._on_report_ready)
 
     def _wire_executors(self) -> None:
         bus.vehicle_connected.connect(
@@ -637,7 +654,7 @@ class DashboardView(QWidget):
         tabs = QTabWidget()
 
         # Create the planner first so MissionPanel can hold a reference to it
-        self._planner = MissionPlannerView(self._connector)
+        self._planner = MissionPlannerView(self._connector, self._ai_service)
 
         # Tab 0: Overview — telemetry, health, mission execution
         overview = QWidget()
@@ -652,6 +669,21 @@ class DashboardView(QWidget):
         ov.addWidget(
             MissionPanel(self._executor, self._runner, self._connector, self._planner)
         )
+
+        # Mission Report — hidden until a report is generated
+        self._report_group = QGroupBox("Mission Report")
+        report_layout = QVBoxLayout(self._report_group)
+        report_layout.setContentsMargins(8, 8, 8, 8)
+        self._report_text = QTextEdit()
+        self._report_text.setReadOnly(True)
+        self._report_text.setFixedHeight(120)
+        self._report_text.setStyleSheet(
+            "background: #1a1a1a; color: #ccc; font-size: 12px; border: none;"
+        )
+        report_layout.addWidget(self._report_text)
+        self._report_group.setVisible(False)
+        ov.addWidget(self._report_group)
+
         ov.addStretch()
         tabs.addTab(overview, "Overview")
 
@@ -672,3 +704,53 @@ class DashboardView(QWidget):
     def _on_sim_ready(self) -> None:
         self._start_btn.setText("Sim Running")
         self._world_combo.setEnabled(False)
+
+    # ── mission report ────────────────────────────────────────────────────────
+
+    def _on_telemetry_snapshot(self, data: dict) -> None:
+        """Keep a rolling copy of the latest telemetry for post-mission reporting."""
+        self._last_telemetry = dict(data)
+
+    def _on_mission_started_for_report(self) -> None:
+        self._mission_start_time = time.time()
+
+    def _on_mission_completed(self) -> None:
+        if not self._ai_service or not self._ai_service.assistant:
+            return
+
+        telemetry = dict(self._last_telemetry)
+        if self._mission_start_time is not None:
+            telemetry["mission_duration_s"] = round(
+                time.time() - self._mission_start_time, 1
+            )
+            self._mission_start_time = None
+
+        self._report_text.setPlainText("Generating mission report…")
+        self._report_group.setVisible(True)
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._ai_service.assistant.generate_mission_report(telemetry),
+            self._connector.loop,
+        )
+        future.add_done_callback(self._on_report_future_done)
+
+    def _on_report_future_done(self, future) -> None:
+        try:
+            report = future.result()
+        except Exception as e:
+            report = f"Report generation failed: {e}"
+        self._report_ready.emit(report)
+
+    def _on_report_ready(self, report: str) -> None:
+        self._report_text.setPlainText(report)
+        self._report_group.setVisible(True)
+        self._save_report(report)
+
+    def _save_report(self, report: str) -> None:
+        import datetime
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+            (_REPORTS_DIR / f"mission_report_{ts}.txt").write_text(report, encoding="utf-8")
+        except OSError:
+            pass  # Non-critical — display still works even if save fails

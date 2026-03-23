@@ -1,3 +1,5 @@
+import asyncio
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -12,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.events.event_bus import bus
+from app.services.ai_service import AIService
 from app.services.sim_controller import SimController
 from app.state.state_store import DroneMode, StateStore
 from integrations.mavsdk.connector import DroneConnector
@@ -91,6 +94,12 @@ class MainWindow(QMainWindow):
         self._sim_controller = SimController(self)
         self._connector = DroneConnector(self)
 
+        # AI service — loop is already running, probe runs in background.
+        self._ai_service = AIService()
+        asyncio.run_coroutine_threadsafe(
+            self._ai_service.initialise(), self._connector.loop
+        )
+
         self.setWindowTitle("Drone Command Center")
         self.setMinimumSize(960, 640)
 
@@ -115,7 +124,10 @@ class MainWindow(QMainWindow):
         from app.ui.dashboard_view import DashboardView
         self.statusBar().showMessage(f"Mode: {mode}  |  Dashboard ready")
         self.setCentralWidget(
-            DashboardView(self._state, self._sim_controller, self._connector, self)
+            DashboardView(
+                self._state, self._sim_controller, self._connector,
+                self._ai_service, self
+            )
         )
         bus.vehicle_connected.connect(
             lambda: self.statusBar().showMessage(f"Mode: {mode}  |  Vehicle connected")

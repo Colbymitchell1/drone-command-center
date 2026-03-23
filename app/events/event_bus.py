@@ -19,6 +19,7 @@ class EventBus(QObject):
 
     # Mission
     mission_uploaded = Signal()
+    mission_waypoints_ready = Signal(list)  # actual uploaded [[lat, lon], ...] after GPS anchor
     mission_started = Signal()
     mission_completed = Signal()
     mission_aborted = Signal(str)       # reason string

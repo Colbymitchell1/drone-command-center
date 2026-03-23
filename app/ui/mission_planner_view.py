@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import Optional
 
 from PySide6.QtCore import QObject, QUrl, Signal, Slot
 from PySide6.QtWidgets import (
@@ -43,8 +44,8 @@ _MAP_HTML_TEMPLATE = """<!DOCTYPE html>
   <script>
     var map = L.map('map').setView([$HOME_LAT, $HOME_LON], 14);
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
       maxZoom: 19
     }).addTo(map);
 
@@ -248,6 +249,16 @@ _MAP_HTML_TEMPLATE = """<!DOCTYPE html>
       currentWps = [];
     }
 
+    // Programmatically set a polygon (e.g. from AI assist).
+    // Clears any previously drawn polygon and zooms the map to fit.
+    function setPolygon(verts) {
+      drawnItems.clearLayers();
+      if (!verts || verts.length < 3) return;
+      var poly = L.polygon(verts, { color: '#3388ff', weight: 2, fillOpacity: 0.08 });
+      drawnItems.addLayer(poly);
+      map.fitBounds(poly.getBounds());
+    }
+
     function setCenter(lat, lon) {
       map.setView([lat, lon], 14);
     }
@@ -295,18 +306,22 @@ class MissionPlannerView(QWidget):
 
     # Emitted from asyncio thread, delivered on Qt main thread via queued conn.
     _upload_result = Signal(bool, str)
+    _ai_result = Signal(object)   # dict on success, str on error
 
-    def __init__(self, connector: DroneConnector, parent=None):
+    def __init__(self, connector: DroneConnector, ai_service=None, parent=None):
         super().__init__(parent)
         self._connector = connector
+        self._ai_service = ai_service
         self._polygon: list = []
         self._offsets: list = []   # (north_m, east_m) from polygon centroid
         self._bridge = _MapBridge(self)
+        self._last_drone_pos: Optional[tuple[float, float]] = None
 
         self._build_ui()
 
         self._bridge.polygon_received.connect(self._on_polygon)
         self._upload_result.connect(self._on_upload_result)
+        self._ai_result.connect(self._on_ai_result)
 
         # Upload button enablement
         bus.vehicle_connected.connect(self._refresh_upload_btn)
@@ -317,6 +332,7 @@ class MissionPlannerView(QWidget):
         bus.vehicle_disconnected.connect(self._on_vehicle_disconnected_map)
 
         # Mission state on map
+        bus.mission_waypoints_ready.connect(self._on_waypoints_ready)
         bus.mission_started.connect(self._on_mission_started_map)
         bus.mission_completed.connect(self._on_mission_ended_map)
         bus.mission_aborted.connect(lambda _: self._on_mission_ended_map())
@@ -388,7 +404,33 @@ class MissionPlannerView(QWidget):
         )
         self._status_lbl.setStyleSheet("color: #888; font-size: 11px; padding: 0 8px;")
 
+        # AI Mission Assist panel
+        ai_box = QGroupBox("AI Mission Assist")
+        ai_row = QHBoxLayout(ai_box)
+        ai_row.setContentsMargins(8, 6, 8, 6)
+        ai_row.setSpacing(8)
+
+        self._ai_input = QLineEdit()
+        self._ai_input.setPlaceholderText("Describe your search mission…")
+        self._ai_input.returnPressed.connect(self._on_generate_mission)
+
+        self._ai_btn = QPushButton("Generate Mission")
+        self._ai_btn.setFixedWidth(148)
+        self._ai_btn.clicked.connect(self._on_generate_mission)
+
+        self._ai_status = QLabel()
+        self._ai_status.setStyleSheet("color: #888; font-size: 11px;")
+
+        ai_row.addWidget(QLabel("Mission:"))
+        ai_row.addWidget(self._ai_input, stretch=1)
+        ai_row.addWidget(self._ai_btn)
+        ai_row.addWidget(self._ai_status)
+
+        # Show unavailable state immediately if no backend is ready
+        self._refresh_ai_panel()
+
         root.addLayout(loc_row)
+        root.addWidget(ai_box)
         root.addWidget(self._web, stretch=1)
         root.addWidget(ctrl_box)
         root.addWidget(self._status_lbl)
@@ -437,7 +479,7 @@ class MissionPlannerView(QWidget):
 
         async def _upload():
             await upload_geofence(self._connector.drone, polygon)
-            await upload_mission(self._connector.drone, offsets)
+            return await upload_mission(self._connector.drone, offsets)
 
         self._upload_btn.setEnabled(False)
         self._set_status("Fetching drone position and uploading mission…")
@@ -447,10 +489,11 @@ class MissionPlannerView(QWidget):
     def _on_upload_done(self, future) -> None:
         """Called from asyncio thread — emit signal for Qt-thread delivery."""
         try:
-            future.result()
-            n = len(self._offsets)
+            waypoints = future.result()   # List[LatLon] — GPS-anchored actual positions
+            bus.mission_waypoints_ready.emit(waypoints)
             self._upload_result.emit(
-                True, f"Uploaded {n} waypoints + geofence (anchored at drone position)."
+                True,
+                f"Uploaded {len(waypoints)} waypoints + geofence (anchored at drone position).",
             )
         except Exception as e:
             self._upload_result.emit(False, f"Upload failed: {e}")
@@ -465,15 +508,25 @@ class MissionPlannerView(QWidget):
 
     # ── live map slots ────────────────────────────────────────────────────────
 
+    def _on_waypoints_ready(self, waypoints: list) -> None:
+        """
+        Redraw map markers at the actual GPS-anchored coordinates returned by
+        upload_mission().  Replaces the centroid-preview positions so the map
+        matches exactly what was uploaded to the drone.
+        """
+        self._web.page().runJavaScript(f"setWaypoints({json.dumps(waypoints)});")
+
     def _on_telemetry_map(self, data: dict) -> None:
         """Update drone position marker on every telemetry tick (4 Hz)."""
         lat     = data.get("lat")
         lon     = data.get("lon")
         heading = data.get("heading")
-        if isinstance(lat, float) and isinstance(lon, float) and isinstance(heading, float):
-            self._web.page().runJavaScript(
-                f"updateDroneMarker({lat}, {lon}, {heading});"
-            )
+        if isinstance(lat, float) and isinstance(lon, float):
+            self._last_drone_pos = (lat, lon)
+            if isinstance(heading, float):
+                self._web.page().runJavaScript(
+                    f"updateDroneMarker({lat}, {lon}, {heading});"
+                )
 
     def _on_vehicle_disconnected_map(self) -> None:
         self._web.page().runJavaScript("hideDroneMarker();")
@@ -532,6 +585,76 @@ class MissionPlannerView(QWidget):
     def spacing_m(self) -> float:
         """Current leg spacing in metres."""
         return float(self._spacing_spin.value())
+
+    # ── AI assist ─────────────────────────────────────────────────────────────
+
+    def _refresh_ai_panel(self) -> None:
+        """Show or hide the AI input row based on backend availability."""
+        available = bool(self._ai_service and self._ai_service.available)
+        self._ai_input.setVisible(available)
+        self._ai_btn.setVisible(available)
+        if not available:
+            self._ai_status.setText("AI unavailable — draw mission manually")
+        else:
+            self._ai_status.setText("")
+
+    def _on_generate_mission(self) -> None:
+        # Re-check at call time in case background init just finished
+        if not self._ai_service or not self._ai_service.available:
+            self._refresh_ai_panel()
+            return
+
+        desc = self._ai_input.text().strip()
+        if not desc:
+            self._ai_status.setText("Enter a mission description first.")
+            return
+
+        if not self._connector.loop:
+            self._ai_status.setText("No event loop — connect a drone first.")
+            return
+
+        self._ai_btn.setEnabled(False)
+        self._ai_status.setText("Thinking…")
+
+        pos = self._last_drone_pos
+        future = asyncio.run_coroutine_threadsafe(
+            self._ai_service.assistant.assist_mission(desc, pos),
+            self._connector.loop,
+        )
+        future.add_done_callback(self._on_ai_future_done)
+
+    def _on_ai_future_done(self, future) -> None:
+        """Called from asyncio thread — forward to Qt thread via signal."""
+        try:
+            result = future.result()
+        except Exception as e:
+            result = str(e)
+        self._ai_result.emit(result)
+
+    @Slot(object)
+    def _on_ai_result(self, result) -> None:
+        self._ai_btn.setEnabled(True)
+
+        if isinstance(result, str):
+            # Error message
+            self._ai_status.setText(f"Error: {result}")
+            return
+
+        try:
+            polygon = result["polygon"]
+            spacing_m = float(result["leg_spacing_m"])
+        except (KeyError, TypeError, ValueError) as e:
+            self._ai_status.setText(f"Invalid AI response: {e}")
+            return
+
+        # Populate the polygon and generate the lawnmower pattern
+        self._polygon = polygon
+        self._spacing_spin.setValue(int(max(5, min(500, spacing_m))))
+        self._web.page().runJavaScript(f"setPolygon({json.dumps(polygon)});")
+        self._generate_and_display(self._spacing_spin.value())
+        self._ai_status.setText(
+            f"Mission generated ({len(polygon)}-vertex polygon, {spacing_m:.0f} m legs)."
+        )
 
     def _set_status(self, msg: str, error: bool = False) -> None:
         color = "#f44336" if error else "#888"

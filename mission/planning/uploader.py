@@ -15,7 +15,7 @@ from mission.planning.lawnmower import OffsetM, offsets_to_latlon
 
 LatLon = Tuple[float, float]
 
-_CRUISE_ALT_M        = 10.0
+_CRUISE_ALT_M        = 25.0
 _CRUISE_SPEED_MS     = 5.0
 _ACCEPTANCE_RADIUS_M = 2.0   # how close the drone must get before accepting a waypoint
 _LOITER_TIME_S       = 0.0   # no pause at waypoints; NaN can stall PX4 indefinitely
@@ -37,10 +37,13 @@ async def upload_geofence(drone: System, polygon: List[LatLon]) -> None:
     await drone.geofence.upload_geofence(GeofenceData([fence], []))
 
 
-async def upload_mission(drone: System, offsets: List[OffsetM]) -> None:
+async def upload_mission(drone: System, offsets: List[OffsetM]) -> List[LatLon]:
     """
     Fetch the drone's current GPS position, place the lawnmower pattern
     relative to that position, then upload the resulting mission.
+
+    Returns the actual uploaded waypoint coordinates (GPS-anchored) so callers
+    can update the map to show the real positions rather than the preview.
 
     Args:
         drone:   Connected MAVSDK System.
@@ -88,3 +91,4 @@ async def upload_mission(drone: System, offsets: List[OffsetM]) -> None:
     ]
     await drone.mission.upload_mission(MissionPlan(items))
     print(f"[uploader] Mission upload complete.")
+    return waypoints
