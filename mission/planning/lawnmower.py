@@ -40,6 +40,17 @@ def polygon_center(polygon: List[LatLon]) -> LatLon:
     return (lat, lon)
 
 
+def latlon_to_offsets(origin: LatLon, waypoints: List[LatLon]) -> List[OffsetM]:
+    """Inverse of offsets_to_latlon — converts absolute lat/lon waypoints back to
+    (north_m, east_m) offsets relative to origin."""
+    lat0, lon0 = origin
+    mpl = _meters_per_lon_deg(lat0)
+    return [
+        ((lat - lat0) * _METERS_PER_LAT_DEG, (lon - lon0) * mpl)
+        for lat, lon in waypoints
+    ]
+
+
 def offsets_to_latlon(origin: LatLon, offsets: List[OffsetM]) -> List[LatLon]:
     """
     Place a list of (north_m, east_m) offsets at the given GPS origin.

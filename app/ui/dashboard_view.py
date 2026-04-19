@@ -38,7 +38,7 @@ from app.ui.map_view import MapView
 from integrations.mavsdk.connector import DroneConnector
 from mission.execution.executor import LawnmowerExecutor, MissionStatus
 from mission.execution.mission_runner import UploadedMissionRunner
-from mission.planning.lawnmower import generate_lawnmower, offsets_to_latlon, polygon_center
+from mission.planning.lawnmower import generate_lawnmower, latlon_to_offsets, offsets_to_latlon, polygon_center
 from mission.validation.preflight import PreflightChecker
 
 
@@ -706,6 +706,7 @@ class DashboardView(QWidget):
         # Right panel — map
         self._map = MapView()
         self._map.polygon_received.connect(self._on_polygon)
+        self._map.waypoint_edit_received.connect(self._on_waypoint_edit)
         splitter.addWidget(self._map)
 
         splitter.setSizes([320, 9999])
@@ -1045,6 +1046,16 @@ class DashboardView(QWidget):
     def _on_spacing_changed(self, value: int) -> None:
         if self._polygon:
             self._generate_and_display(value)
+
+    def _on_waypoint_edit(self, waypoints: list) -> None:
+        if not self._polygon or not waypoints:
+            return
+        origin = polygon_center([tuple(p) for p in self._polygon])
+        self._offsets = latlon_to_offsets(origin, waypoints)
+        self._set_plan_status(
+            f"{len(self._offsets)} waypoints (edited) — upload to apply changes."
+        )
+        self._refresh_upload_btn()
 
     def _generate_and_display(self, spacing_m: int) -> None:
         polygon_tuples = [tuple(p) for p in self._polygon]
