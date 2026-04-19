@@ -37,27 +37,21 @@ async def upload_geofence(drone: System, polygon: List[LatLon]) -> None:
     await drone.geofence.upload_geofence(GeofenceData([fence], []))
 
 
-async def upload_mission(drone: System, offsets: List[OffsetM]) -> List[LatLon]:
+async def upload_mission(drone: System, offsets: List[OffsetM], origin: LatLon) -> List[LatLon]:
     """
-    Fetch the drone's current GPS position, place the lawnmower pattern
-    relative to that position, then upload the resulting mission.
+    Place the lawnmower pattern relative to the given origin, then upload.
 
-    Returns the actual uploaded waypoint coordinates (GPS-anchored) so callers
-    can update the map to show the real positions rather than the preview.
+    Returns the uploaded waypoint coordinates so callers can update the map.
 
     Args:
         drone:   Connected MAVSDK System.
         offsets: (north_m, east_m) offsets from generate_lawnmower().
-                 The polygon shape is preserved; only the anchor moves.
+        origin:  (lat, lon) anchor point — must match the preview anchor so the
+                 uploaded mission is spatially identical to the preview.
     """
     nan = float("nan")
 
-    # ── anchor pattern at drone's current position ────────────────────────────
-    async for position in drone.telemetry.position():
-        origin: LatLon = (position.latitude_deg, position.longitude_deg)
-        break
-
-    print(f"[uploader] Drone position: lat={origin[0]:.6f}  lon={origin[1]:.6f}")
+    print(f"[uploader] Mission origin: lat={origin[0]:.6f}  lon={origin[1]:.6f}")
 
     waypoints = offsets_to_latlon(origin, offsets)
 
