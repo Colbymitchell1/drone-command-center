@@ -1,6 +1,6 @@
 # Autonomous Drone Command Center
 
-A desktop ground station for autonomous drone mission planning, telemetry monitoring, and simulation-based workflow testing.
+A desktop ground station for autonomous drone mission planning, execution, telemetry monitoring, and AI-assisted mission review.
 
 ![Mission Planner](docs/mission_planner.png)
 
@@ -8,11 +8,11 @@ A desktop ground station for autonomous drone mission planning, telemetry monito
 
 ## Overview
 
-This project is a PySide6 desktop application built to support core drone operations workflows in simulation. It integrates with PX4 SITL, Gazebo, and MAVSDK to provide an operator-facing interface for mission planning, execution, telemetry monitoring, and safety control.
+This is a full-stack PySide6 desktop application built to support autonomous drone operations workflows in simulation, with a hardware-ready architecture. It integrates with PX4 SITL, Gazebo, and MAVSDK to provide an operator-facing interface for mission planning, execution, telemetry monitoring, and safety control.
 
-The goal of the project is to build a practical command interface that can launch a simulated environment, connect to a vehicle, display live telemetry, plan missions from a map, and execute autonomous coverage behavior in a controlled workflow.
+The system is built around a provider-agnostic LLM review pipeline that performs pre-mission safety analysis and post-mission reporting. Operators can use a local model via Ollama or a cloud provider (Claude, OpenAI, Gemini) through a single abstraction layer — no vendor lock-in.
 
-This is an active portfolio project and is still under development. The current version focuses on proving the architecture, connectivity, and mission workflow foundation rather than presenting a fully finished product.
+This is an active portfolio project. The architecture is designed for real-world field use: reliable, extensible, and simulation-proven before hardware integration.
 
 ---
 
@@ -22,51 +22,45 @@ This is an active portfolio project and is still under development. The current 
 https://www.linkedin.com/posts/colby-mitchell-804847128_dronetech-autonomy-uav-ugcPost-7441303931038883840-cZa1?utm_source=share&utm_medium=member_desktop&rcm=ACoAAB9y18QBXRWFyq6ecRSKmHlAtFM-7MV-BZw
 
 Suggested demo flow:
-- application startup
-- simulation stack launch
+- Application startup
+- Simulation stack launch
 - UDP vehicle connection
-- mission area selection on the map
-- mission upload / mission load
-- mission start in Gazebo
+- Mission area selection on the map
+- Mission upload and execution
+- LLM pre-mission review
+- Live telemetry monitoring in Gazebo
 
 ### Screenshots
 <img width="982" height="700" alt="Screenshot from 2026-03-21 17-40-47" src="https://github.com/user-attachments/assets/d520a6cf-953d-444b-864e-7005c99d05b9" />
 <img width="982" height="700" alt="Pasted image" src="https://github.com/user-attachments/assets/1405702a-3c0f-4405-9925-7139fc7c7c58" />
 
-
-
-Suggested screenshots:
-- main telemetry / overview tab
-- mission planner tab with selected polygon
-- Gazebo simulation view during mission execution
-
 ---
 
 ## Current Status
 
-The project is functional in simulation and currently demonstrates the core mission loop:
+The project is functional in simulation and demonstrates the full mission loop end-to-end:
 
 1. Launch command center
-2. Start simulation stack
-3. Connect to the vehicle over UDP
-4. Draw/select a mission area on the map
-5. Upload or load the mission
-6. Start the autonomous mission from the main interface
-
-The main issue currently being worked is mission/reference-frame alignment. At this stage, the vehicle can launch and begin the mission flow, but mission execution can diverge because the mission map coordinates and the Gazebo home/reference location are not always aligned correctly.
-
-That is a real systems-integration bug, and solving problems like that is part of the point of this project.
+2. Start simulation stack (PX4 SITL + Gazebo)
+3. Connect to vehicle over UDP
+4. Draw mission area on the 3D map
+5. Generate lawnmower coverage pattern
+6. Submit mission for LLM pre-mission review
+7. Upload and execute mission
+8. Monitor live telemetry throughout
+9. Review post-mission summary
 
 ---
 
 ## Features
 
 ### Mission Planning
-- Interactive map interface (Leaflet.js / OpenStreetMap) with real-world coordinates
-- Polygon-based search area definition where the operator draws the boundary and the system generates the pattern
+- Interactive 3D map interface (CesiumJS) with real-world coordinates and terrain rendering
+- Polygon-based area of interest (AOI) definition — operator draws the boundary, system generates the pattern
+- Box mode for rapid rectangular area selection
 - Automatic lawnmower coverage pattern generation fitted to the polygon
 - Adjustable leg spacing for coverage density control
-- Geofence and mission upload to the drone via MAVSDK
+- Mission upload to vehicle via MAVSDK
 
 ### Mission Execution
 - Uploaded mission execution via PX4 mission API
@@ -76,21 +70,28 @@ That is a real systems-integration bug, and solving problems like that is part o
 - Post-mission RTL with retry handling
 - Safety-oriented mission stop workflow
 
+### LLM Mission Review Pipeline
+- Pre-mission safety analysis before execution — flags constraint violations, battery estimates, altitude conflicts
+- Post-mission summary generation with performance notes
+- Provider-agnostic LLM backend: Claude, OpenAI, Gemini (BYOK), or local Ollama
+- Single abstraction layer — swap providers without touching mission logic
+- Local inference supported via Ollama over Tailscale for air-gapped / offline operation
+
 ### Telemetry & System Health
-- Live telemetry display: latitude, longitude, altitude, speed, heading, battery
-- System health visibility for PX4 SITL status, Gazebo status, and UDP connectivity
+- Live telemetry: latitude, longitude, altitude, speed, heading, battery
+- System health visibility for PX4 SITL, Gazebo, and UDP connectivity
 - Vehicle connection status with connect/disconnect control
 
 ### Simulation Management
 - One-click sim stack launch (PX4 SITL + Gazebo + QGroundControl)
 - World selector support
-- Simulation and real mode separation at the UI / workflow level
+- Clean SIM / REAL mode separation at the UI and workflow level
 
 ---
 
 ## Architecture
 
-The application is organized around a multi-layer architecture with separation between UI, state, services, integrations, and mission logic:
+The application is organized around a multi-layer architecture with clear separation between UI, state, services, integrations, and mission logic.
 
 ```text
 command_center/
@@ -101,8 +102,9 @@ command_center/
 │   ├── events/           # EventBus (Qt signals)
 │   └── state/            # StateStore (single source of truth)
 ├── integrations/
-│   ├── mavsdk/           # DroneConnector, TelemetryManager
+│   ├── mavsdk/           # VehicleAdapter, TelemetryManager
 │   ├── mavlink/
+│   ├── llm/              # Provider-agnostic LLM abstraction layer
 │   ├── sim/
 │   └── real/
 ├── mission/
@@ -117,13 +119,14 @@ command_center/
 └── main.py
 ```
 
-**Communication pattern:** event-driven via Qt signals. The UI emits commands, controllers call services, services publish events, and the UI subscribes to state updates.
+**Communication pattern:** Event-driven via Qt signals (EventBus). The UI emits commands, controllers call services, services publish events, and the UI subscribes to state updates. No direct coupling between layers.
 
 **Key design decisions:**
+- VehicleAdapter abstracts the vehicle interface so SIM and REAL modes share the same command surface
 - Telemetry is published to the UI at a controlled rate to avoid flooding the interface with high-frequency updates
 - asyncio runs on a dedicated background thread so MAVSDK work does not block the Qt event loop
-- SIM and REAL modes are designed around shared interfaces so the rest of the application can remain largely mode-agnostic
-- Mission waypoints are generated and uploaded through a mission-planning pipeline intended to support both simulation and future hardware workflows
+- LLM provider is runtime-configurable — the mission pipeline calls one interface regardless of backend
+- Mission waypoints flow through a planning pipeline designed for both simulation and future hardware use
 
 ---
 
@@ -132,11 +135,14 @@ command_center/
 | Layer | Technology |
 |---|---|
 | Desktop UI | Python, PySide6 / Qt |
-| Map / Mission Planner | Leaflet.js, OpenStreetMap |
+| Map / Mission Planner | CesiumJS (3D terrain, real-world coordinates) |
 | Vehicle Communication | MAVSDK, MAVLink |
+| Vehicle Abstraction | VehicleAdapter (SIM/REAL interface) |
+| LLM Review Pipeline | Claude / OpenAI / Gemini / Ollama (provider-agnostic) |
 | Simulation | PX4 SITL, Gazebo |
 | Event System | Qt Signals (EventBus pattern) |
 | State Management | Custom StateStore (QObject) |
+| Remote Inference | Ollama over Tailscale |
 | Configuration | JSON, YAML |
 | Version Control | Git |
 
@@ -149,6 +155,7 @@ command_center/
 - PX4 Autopilot (built for SITL)
 - Gazebo Garden or later
 - QGroundControl (optional)
+- Ollama (optional, for local LLM inference)
 
 ---
 
@@ -186,59 +193,63 @@ python main.py
 7. Click **Draw Search Area** and define your polygon on the map
 8. Adjust leg spacing as needed
 9. Click **Upload Mission**
-10. Return to the main / overview tab
-11. Click **Start Uploaded Mission**
+10. Review the LLM pre-mission analysis
+11. Return to the main tab and click **Start Uploaded Mission**
 12. Monitor telemetry and mission status
-13. Click **Abort** at any time to trigger return-to-launch behavior
+13. Click **Abort** at any time to trigger RTL behavior
 
 ### Manual Lawnmower Mode
 
-Use **Start Lawnmower Search** from the main interface for a more direct search workflow without the uploaded mission sequence.
+Use **Start Lawnmower Search** from the main interface for direct search execution without the uploaded mission sequence.
+
+### LLM Configuration
+
+Set your preferred provider and API key in the settings panel before mission upload. For local inference, point the Ollama endpoint at your local or Tailscale-connected server.
 
 ---
 
 ## Roadmap
 
 ### Near-Term
-- [ ] Fix mission coordinate / home reference mismatch
-- [ ] Improve mission execution reliability
-- [ ] Clean up mission planning workflow
-- [ ] Improve UI clarity and operator flow
+- [ ] Wire LLM pre-mission review panel into UI
+- [ ] Post-mission review display in UI
+- [ ] Mission save / load from planning view
+- [ ] Hotkeys for emergency stop, mission pause, and resume
+
+### Medium-Term
+- [ ] FPV video feed panel (GStreamer / UDP stream from companion computer)
+- [ ] Gesture-based operator input via base station camera (MediaPipe)
+- [ ] Real hardware integration (serial MAVLink, Pixhawk/Cube)
 
 ### Longer-Term
-- [ ] Real hardware integration with flight controller / serial MAVLink workflow
-- [ ] Video feed integration in the operator interface
-- [ ] Mission feasibility checks (battery, time, altitude, basic constraints)
-- [ ] AI mission assist / operator support features
-- [ ] Multi-drone expansion and command-center style scaling
+- [ ] Onboard intelligence integration (Jetson Orin, obstacle avoidance, onboard recording)
+- [ ] Multi-drone command and control
+- [ ] ATAK / CoT integration for multi-operator coordination
+- [ ] AI natural language command interface
 
 ---
 
 ## Why I Built This
 
-I wanted a project that was closer to the kind of work I’m genuinely interested in: autonomy, mission systems, simulation, and multi-component technical integration.
+I wanted a project that dealt with the kind of problems that actually show up in autonomous systems work: multi-component integration, real-time state management, simulation-to-hardware workflows, and operator-facing interfaces that have to be reliable under pressure.
 
-Rather than build something purely academic, I wanted something that forced me to deal with desktop UI architecture, simulator integration, telemetry pipelines, mission planning logic, and debugging across multiple moving parts.
-
-This project is helping me bridge the gap between software, robotics, and real-world drone operations.
+This isn't a tutorial project. It's a working system built to prove architecture, not just syntax.
 
 ---
 
 ## Background
 
-This project reflects the direction I’m intentionally moving toward technically.
+My background is in aerospace maintenance and test environments across military and commercial domains. I'm building deeper into software, autonomy, and mission systems -- this project is the practical application of that direction.
 
-My background is in aerospace maintenance, test environments, and hands-on troubleshooting. I’m now building more software and autonomy-focused projects to move deeper into robotics, drones, and integrated mission systems.
-
-This is not meant to be presented as a finished product. It is meant to show real progress, real integration work, and real problem-solving in a domain I care about.
+The goal was a system I could demo, extend, and eventually fly on real hardware. That's still the plan.
 
 ---
 
 ## Author
 
-**Colby Mitchell**  
-Systems Integration & Technical Operations | Autonomous Systems | Aerospace R&D  
-Active Secret Clearance  
+**Colby Mitchell**
+Systems Integration & Technical Operations | Autonomous Systems | Aerospace R&D
+Active Secret Clearance
 
 [GitHub](https://github.com/Colbymitchell1) · [LinkedIn](https://www.linkedin.com/in/colby-mitchell-804847128/)
 
