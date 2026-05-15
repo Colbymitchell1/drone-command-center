@@ -1,0 +1,3 @@
+Mission Summary:
+
+The autonomous drone successfully completed its mission with a total duration of 172.6 seconds. The vehicle maintained a steady heading of 90.3 degrees and an average speed of 1.5 meters per second, operating at an altitude of 25.0 meters above ground level. At the time of landing, the battery was at 50% capacity, indicating efficient power management throughout the flight.

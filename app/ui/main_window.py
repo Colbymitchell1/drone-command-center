@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from app.events.event_bus import bus
 from app.services.ai_service import AIService
+from app.services.llm_review import LLMReviewService
 from app.services.sim_controller import SimController
 from app.state.state_store import DroneMode, StateStore
 from integrations.mavsdk.connector import DroneConnector
@@ -100,6 +101,9 @@ class MainWindow(QMainWindow):
             self._ai_service.initialise(), self._connector.loop
         )
 
+        # LLM review service — backend resolved lazily on first call.
+        self._llm_review = LLMReviewService()
+
         self.setWindowTitle("Drone Command Center")
         self.setMinimumSize(960, 640)
 
@@ -126,7 +130,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(
             DashboardView(
                 self._state, self._sim_controller, self._connector,
-                self._ai_service, self
+                self._ai_service, self._llm_review, self
             )
         )
         bus.vehicle_connected.connect(

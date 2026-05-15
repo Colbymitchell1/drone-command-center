@@ -230,6 +230,21 @@ class MissionStorage:
         log.info(f"Mission saved: {path}")
         return path
 
+    def save_mission_to_path(self, plan: MissionPlan, path: Path) -> Path:
+        """
+        Serialize MissionPlan to an arbitrary file path (file-picker workflow).
+        The destination need not be inside base_dir.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            **_to_dict(plan),
+        }
+        path.write_text(json.dumps(payload, indent=2))
+        log.info(f"Mission saved: {path}")
+        return path
+
     def load_mission(self, path: Path) -> MissionPlan:
         """
         Load a MissionPlan from a mission.json file.

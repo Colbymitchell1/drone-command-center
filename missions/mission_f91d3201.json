@@ -1,0 +1,175 @@
+{
+  "schema_version": "0.1.0",
+  "mission_id": "f91d3201-0a7e-46fd-896b-c41e0c9b94b1",
+  "created_at_utc": "2026-05-15T17:48:14.275510+00:00",
+  "mission_type": "survey",
+  "site_name": "",
+  "notes": "Leg spacing: 20 m",
+  "geometry": {
+    "waypoints": [
+      {
+        "lat": 32.921912698820115,
+        "lon": -117.2588227602055,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 0
+      },
+      {
+        "lat": 32.921912698820115,
+        "lon": -117.25688124654934,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 1
+      },
+      {
+        "lat": 32.922092361055114,
+        "lon": -117.25688124654934,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 2
+      },
+      {
+        "lat": 32.922092361055114,
+        "lon": -117.2588227602055,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 3
+      },
+      {
+        "lat": 32.92227202329011,
+        "lon": -117.2588227602055,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 4
+      },
+      {
+        "lat": 32.92227202329011,
+        "lon": -117.25688124654934,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 5
+      },
+      {
+        "lat": 32.92245168552511,
+        "lon": -117.25688124654934,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 6
+      },
+      {
+        "lat": 32.92245168552511,
+        "lon": -117.2588227602055,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 7
+      },
+      {
+        "lat": 32.92263134776011,
+        "lon": -117.2588227602055,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 8
+      },
+      {
+        "lat": 32.92263134776011,
+        "lon": -117.25688124654934,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 9
+      },
+      {
+        "lat": 32.92281100999511,
+        "lon": -117.25688124654934,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 10
+      },
+      {
+        "lat": 32.92281100999511,
+        "lon": -117.2588227602055,
+        "alt_m": 25.0,
+        "speed_mps": 5.0,
+        "acceptance_radius": 2.0,
+        "is_fly_through": true,
+        "index": 11
+      }
+    ],
+    "aoi_polygon": [
+      [
+        32.921822867702616,
+        -117.2588227602055
+      ],
+      [
+        32.921822867702616,
+        -117.25688124654934
+      ],
+      [
+        32.922910426868,
+        -117.25688124654934
+      ],
+      [
+        32.922910426868,
+        -117.2588227602055
+      ]
+    ],
+    "geofence_polygon": [
+      [
+        32.921822867702616,
+        -117.2588227602055
+      ],
+      [
+        32.921822867702616,
+        -117.25688124654934
+      ],
+      [
+        32.922910426868,
+        -117.25688124654934
+      ],
+      [
+        32.922910426868,
+        -117.2588227602055
+      ]
+    ],
+    "takeoff_location": null,
+    "landing_location": null
+  },
+  "regulatory": {
+    "country": "US",
+    "operating_rule": "FAA_PART_107",
+    "requires_controlled_airspace": false,
+    "night_operation": false,
+    "over_people": false,
+    "over_moving_vehicles": false,
+    "bvlos": false,
+    "max_altitude_agl_ft": 400.0
+  },
+  "failsafes": {
+    "lost_link_action": "RTL",
+    "low_battery_action": "RTL",
+    "geofence_breach_action": "RTL",
+    "mission_abort_action": "HOLD"
+  },
+  "risk_review": null
+}

@@ -12,25 +12,39 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from datetime import datetime, timezone
+
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
+    QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
     QSplitter,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from app.events.event_bus import bus
+from app.models.domain import (
+    FlightLog,
+    FlightLogExecution,
+    FlightLogPreflight,
+    MissionPlan,
+    MissionGeometry,
+    MissionType,
+    Waypoint,
+)
 from app.services.battery_monitor import BatteryMonitor
+from app.services.mission_storage import MissionStorage
 from app.services.sim_controller import SimController
 from app.services.sim_controller import SIM_HOME_LAT, SIM_HOME_LON
 from app.state.state_store import DroneMode, StateStore
@@ -579,6 +593,34 @@ class MissionPanel(QGroupBox):
 _REPORTS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "reports"
 
 
+# ── Report section helpers ─────────────────────────────────────────────────────
+
+def _section_header_label(title: str) -> QLabel:
+    lbl = QLabel(title.upper())
+    lbl.setStyleSheet(
+        f"color: {_C_MUTED}; font-size: 10px; letter-spacing: 1px; font-weight: bold;"
+    )
+    return lbl
+
+
+def _make_finding_row(category: str, message: str) -> QWidget:
+    row = QWidget()
+    rl = QHBoxLayout(row)
+    rl.setContentsMargins(0, 0, 0, 0)
+    rl.setSpacing(6)
+
+    cat = QLabel(category)
+    cat.setFixedWidth(86)
+    cat.setStyleSheet(f"color: {_C_WARNING}; font-size: 10px; font-weight: bold;")
+    rl.addWidget(cat)
+
+    msg = QLabel(message)
+    msg.setWordWrap(True)
+    msg.setStyleSheet(f"color: {_C_TEXT}; font-size: 11px;")
+    rl.addWidget(msg, stretch=1)
+    return row
+
+
 # ── Geometry helpers ───────────────────────────────────────────────────────────
 
 def _convex_hull(points: list) -> list:
@@ -625,9 +667,10 @@ class _PlannerProxy:
 
 
 class DashboardView(QWidget):
-    _upload_result = Signal(bool, str)
-    _ai_result     = Signal(object)
-    _report_ready  = Signal(str)
+    _upload_result    = Signal(bool, str)
+    _ai_result        = Signal(object)
+    _review_ready     = Signal(object)   # MissionRiskReview | None
+    _post_review_ready = Signal(object)  # PostMissionReview | None
 
     def __init__(
         self,
@@ -635,6 +678,7 @@ class DashboardView(QWidget):
         sim_controller: SimController,
         connector: DroneConnector,
         ai_service=None,
+        llm_review=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -642,6 +686,7 @@ class DashboardView(QWidget):
         self._sim        = sim_controller
         self._connector  = connector
         self._ai_service = ai_service
+        self._llm_review = llm_review
 
         self._executor        = LawnmowerExecutor(self)
         self._runner          = UploadedMissionRunner(self)
@@ -653,6 +698,8 @@ class DashboardView(QWidget):
         self._last_drone_pos: Optional[tuple]      = None
         self._last_telemetry: dict                 = {}
         self._mission_start_time: Optional[float]  = None
+        self._last_uploaded_plan: Optional["MissionPlan"] = None
+        self._pending_plan: Optional["MissionPlan"] = None
 
         self._build_ui()
         self._wire_executors()
@@ -686,7 +733,8 @@ class DashboardView(QWidget):
 
         self._upload_result.connect(self._on_upload_result)
         self._ai_result.connect(self._on_ai_result)
-        self._report_ready.connect(self._on_report_ready)
+        self._review_ready.connect(self._on_review_ready)
+        self._post_review_ready.connect(self._on_post_review_ready)
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -930,6 +978,26 @@ class DashboardView(QWidget):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # File row: Save / Load
+        file_row = QHBoxLayout()
+        file_row.setSpacing(6)
+
+        self._save_btn = QPushButton("Save Mission")
+        self._save_btn.setFixedWidth(110)
+        self._save_btn.setEnabled(False)
+        self._save_btn.setToolTip("Save the current mission plan to a JSON file")
+        self._save_btn.clicked.connect(self._on_save_mission)
+        file_row.addWidget(self._save_btn)
+
+        load_btn = QPushButton("Load Mission")
+        load_btn.setFixedWidth(110)
+        load_btn.setToolTip("Load a previously-saved mission plan from a JSON file")
+        load_btn.clicked.connect(self._on_load_mission)
+        file_row.addWidget(load_btn)
+
+        file_row.addStretch()
+        layout.addLayout(file_row)
+
         # Planning status label
         self._plan_status = QLabel(
             "Draw a search area on the map."
@@ -950,17 +1018,70 @@ class DashboardView(QWidget):
         box = QGroupBox("Mission Report")
         layout = QVBoxLayout(box)
         layout.setContentsMargins(8, 10, 8, 8)
+        layout.setSpacing(6)
 
-        self._report_text = QTextEdit()
-        self._report_text.setReadOnly(True)
-        self._report_text.setFixedHeight(100)
-        self._report_text.setStyleSheet(
-            f"background: {_C_BG}; color: {_C_TEXT}; font-size: 11px; border: none;"
-        )
-        layout.addWidget(self._report_text)
+        self._report_model_lbl = QLabel("")
+        self._report_model_lbl.setStyleSheet(f"color: {_C_MUTED}; font-size: 10px;")
+        self._report_model_lbl.setWordWrap(True)
+        layout.addWidget(self._report_model_lbl)
+
+        self._report_content = QWidget()
+        self._report_content_layout = QVBoxLayout(self._report_content)
+        self._report_content_layout.setContentsMargins(0, 0, 0, 0)
+        self._report_content_layout.setSpacing(6)
+        layout.addWidget(self._report_content)
 
         box.setVisible(False)
         return box
+
+    def _clear_report_content(self) -> None:
+        while self._report_content_layout.count():
+            item = self._report_content_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _set_report_message(self, msg: str) -> None:
+        """Single-line status (e.g. 'Generating…' or an error) inside the report box."""
+        self._clear_report_content()
+        self._report_model_lbl.setText("")
+        lbl = QLabel(msg)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(f"color: {_C_MUTED}; font-size: 11px;")
+        self._report_content_layout.addWidget(lbl)
+
+    def _populate_report(self, review) -> None:
+        self._clear_report_content()
+        self._report_model_lbl.setText(
+            f"via {review.llm_model}" if review.llm_model else ""
+        )
+
+        if review.plain_english_summary:
+            self._report_content_layout.addWidget(_section_header_label("Summary"))
+            body = QLabel(review.plain_english_summary)
+            body.setWordWrap(True)
+            body.setStyleSheet(f"color: {_C_TEXT}; font-size: 11px;")
+            self._report_content_layout.addWidget(body)
+
+        if review.findings:
+            self._report_content_layout.addWidget(_section_header_label("Findings"))
+            for f in review.findings:
+                self._report_content_layout.addWidget(_make_finding_row(f.category, f.message))
+
+        if review.recommended_followups:
+            self._report_content_layout.addWidget(
+                _section_header_label("Recommended Follow-ups")
+            )
+            for item in review.recommended_followups:
+                row = QLabel(f"• {item}")
+                row.setWordWrap(True)
+                row.setStyleSheet(f"color: {_C_TEXT}; font-size: 11px;")
+                self._report_content_layout.addWidget(row)
+
+        # Fall back to a "nothing reported" note if review is completely empty.
+        if self._report_content_layout.count() == 0:
+            note = QLabel("Review returned no findings.")
+            note.setStyleSheet(f"color: {_C_MUTED}; font-size: 11px;")
+            self._report_content_layout.addWidget(note)
 
     # ── sim slots ─────────────────────────────────────────────────────────────
 
@@ -1080,6 +1201,65 @@ class DashboardView(QWidget):
             self._set_plan_status("No drone connected.", error=True)
             return
 
+        if self._llm_review is None:
+            self._set_plan_status(
+                "LLM review service unavailable — refusing upload.", error=True,
+            )
+            return
+
+        # Build the plan once; reused by both the review and (on acknowledgment)
+        # the post-mission review at completion time.
+        plan = self._build_mission_plan_from_state()
+        self._pending_plan = plan
+
+        self._upload_btn.setEnabled(False)
+        self._set_plan_status("Running pre-mission LLM review…")
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._llm_review.pre_mission_review(plan),
+            self._connector.loop,
+        )
+        future.add_done_callback(self._on_review_future_done)
+
+    def _on_review_future_done(self, future) -> None:
+        try:
+            review = future.result()
+        except Exception:
+            review = None
+        self._review_ready.emit(review)
+
+    @Slot(object)
+    def _on_review_ready(self, review) -> None:
+        if review is None:
+            self._set_plan_status("Pre-mission review failed.", error=True)
+            self._pending_plan = None
+            self._refresh_upload_btn()
+            return
+
+        from app.ui.llm_review_dialog import LLMReviewDialog
+        dlg = LLMReviewDialog(review, parent=self)
+        accepted = dlg.exec() == QDialog.DialogCode.Accepted
+
+        if not accepted:
+            self._set_plan_status("Upload cancelled by operator.")
+            self._pending_plan = None
+            self._refresh_upload_btn()
+            return
+
+        # Attach the acknowledged review to the plan and stash it for
+        # post-mission summary on completion.
+        plan = self._pending_plan
+        if plan is None:
+            self._set_plan_status("Internal error: no pending plan.", error=True)
+            self._refresh_upload_btn()
+            return
+        plan.risk_review = review
+        self._last_uploaded_plan = plan
+        self._pending_plan = None
+
+        self._perform_upload()
+
+    def _perform_upload(self) -> None:
         from mission.planning.uploader import upload_geofence, upload_mission
 
         polygon = [tuple(p) for p in self._polygon]
@@ -1090,7 +1270,6 @@ class DashboardView(QWidget):
             await upload_geofence(self._connector.drone, polygon)
             return await upload_mission(self._connector.drone, offsets, origin)
 
-        self._upload_btn.setEnabled(False)
         self._set_plan_status("Uploading mission…")
         future = asyncio.run_coroutine_threadsafe(_upload(), self._connector.loop)
         future.add_done_callback(self._on_upload_done)
@@ -1120,12 +1299,129 @@ class DashboardView(QWidget):
         enabled     = has_offsets and has_drone
         print(f"[upload] _refresh_upload_btn: offsets={has_offsets} drone={has_drone} -> enabled={enabled}", file=sys.stderr, flush=True)
         self._upload_btn.setEnabled(enabled)
+        self._save_btn.setEnabled(has_offsets)
         print(f"[upload] _refresh_upload_btn: btn.isEnabled()={self._upload_btn.isEnabled()}", file=sys.stderr, flush=True)
 
     def _set_plan_status(self, msg: str, error: bool = False) -> None:
         color = _C_DANGER if error else _C_MUTED
         self._plan_status.setStyleSheet(f"color: {color}; font-size: 10px;")
         self._plan_status.setText(msg)
+
+    # ── MissionPlan construction ──────────────────────────────────────────────
+
+    def _build_mission_plan_from_state(self) -> MissionPlan:
+        """
+        Build a MissionPlan from the current planner state.
+        Used by both the pre-mission LLM review and Save Mission.
+        """
+        polygon_tuples = [tuple(p) for p in self._polygon]
+        if polygon_tuples and self._offsets:
+            origin = polygon_center(polygon_tuples)
+            absolute = offsets_to_latlon(origin, self._offsets)
+            waypoints = [
+                Waypoint(lat=lat, lon=lon, index=i)
+                for i, (lat, lon) in enumerate(absolute)
+            ]
+        else:
+            waypoints = []
+
+        geometry = MissionGeometry(
+            waypoints=waypoints,
+            aoi_polygon=polygon_tuples,
+            geofence_polygon=polygon_tuples,
+        )
+        return MissionPlan(
+            mission_type=MissionType.SURVEY,
+            site_name="",
+            notes=f"Leg spacing: {self._spacing_spin.value()} m",
+            geometry=geometry,
+        )
+
+    def _rehydrate_plan_into_state(self, plan: MissionPlan) -> None:
+        """
+        Restore _polygon and _offsets from a loaded MissionPlan and refresh the map.
+        """
+        polygon = [list(p) for p in plan.geometry.aoi_polygon]
+        if not polygon and plan.geometry.geofence_polygon:
+            polygon = [list(p) for p in plan.geometry.geofence_polygon]
+
+        if not polygon or not plan.geometry.waypoints:
+            self._set_plan_status("Loaded mission has no geometry.", error=True)
+            return
+
+        polygon_tuples = [tuple(p) for p in polygon]
+        origin = polygon_center(polygon_tuples)
+        latlon_wps = [(wp.lat, wp.lon) for wp in plan.geometry.waypoints]
+        offsets = latlon_to_offsets(origin, latlon_wps)
+
+        self._polygon = polygon
+        self._offsets = offsets
+        self._map.set_polygon(polygon)
+        self._map.set_waypoints(latlon_wps)
+
+        n = len(self._offsets)
+        self._set_plan_status(
+            f"Loaded mission — {n} waypoints. Upload to apply."
+        )
+        self._refresh_upload_btn()
+
+    # ── Save / Load ───────────────────────────────────────────────────────────
+
+    def _missions_dir(self) -> Path:
+        """Default directory the Save/Load file dialogs start in."""
+        return Path(__file__).resolve().parent.parent.parent / "missions"
+
+    def _on_save_mission(self) -> None:
+        if not self._polygon or not self._offsets:
+            self._set_plan_status("Nothing to save — draw a mission first.", error=True)
+            return
+
+        plan = self._build_mission_plan_from_state()
+        # Carry over an acknowledged review if the operator already approved
+        # this plan in the current session.
+        if self._last_uploaded_plan and self._last_uploaded_plan.risk_review:
+            plan.risk_review = self._last_uploaded_plan.risk_review
+
+        start_dir = self._missions_dir()
+        start_dir.mkdir(parents=True, exist_ok=True)
+        default_name = f"mission_{plan.mission_id[:8]}.json"
+
+        path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Mission",
+            str(start_dir / default_name),
+            "Mission JSON (*.json)",
+        )
+        if not path_str:
+            return
+
+        try:
+            saved_path = MissionStorage().save_mission_to_path(plan, Path(path_str))
+        except OSError as e:
+            QMessageBox.warning(self, "Save Mission", f"Failed to save:\n{e}")
+            return
+
+        self._set_plan_status(f"Saved mission to {saved_path.name}.")
+
+    def _on_load_mission(self) -> None:
+        start_dir = self._missions_dir()
+        start_dir.mkdir(parents=True, exist_ok=True)
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Mission",
+            str(start_dir),
+            "Mission JSON (*.json)",
+        )
+        if not path_str:
+            return
+
+        try:
+            plan = MissionStorage().load_mission(Path(path_str))
+        except (FileNotFoundError, ValueError) as e:
+            QMessageBox.warning(self, "Load Mission", f"Failed to load:\n{e}")
+            return
+
+        self._rehydrate_plan_into_state(plan)
 
     # ── AI assist ─────────────────────────────────────────────────────────────
 
@@ -1191,47 +1487,103 @@ class DashboardView(QWidget):
             f"Generated ({len(polygon)}-vertex polygon, {spacing_m:.0f} m legs)."
         )
 
-    # ── mission report ────────────────────────────────────────────────────────
+    # ── mission report (post-mission LLM review) ──────────────────────────────
 
     def _on_mission_completed(self) -> None:
-        if not self._ai_service or not self._ai_service.assistant:
-            return
-
         self._map.clear_mission_state()
 
-        telemetry = dict(self._last_telemetry)
-        if self._mission_start_time is not None:
-            telemetry["mission_duration_s"] = round(
-                time.time() - self._mission_start_time, 1
+        plan = self._last_uploaded_plan
+        if plan is None or self._llm_review is None or not self._connector.loop:
+            self._report_group.setVisible(True)
+            self._set_report_message(
+                "Mission complete — no review available "
+                "(no acknowledged plan recorded or LLM service unavailable)."
             )
             self._mission_start_time = None
+            return
 
-        self._report_text.setPlainText("Generating mission report…")
+        flight_log = self._build_flight_log(plan)
+
         self._report_group.setVisible(True)
+        self._set_report_message("Generating post-mission LLM review…")
 
         future = asyncio.run_coroutine_threadsafe(
-            self._ai_service.assistant.generate_mission_report(telemetry),
+            self._llm_review.post_mission_review(plan, flight_log),
             self._connector.loop,
         )
-        future.add_done_callback(self._on_report_future_done)
+        future.add_done_callback(self._on_post_review_future_done)
+        self._mission_start_time = None
 
-    def _on_report_future_done(self, future) -> None:
+    def _on_post_review_future_done(self, future) -> None:
         try:
-            report = future.result()
-        except Exception as e:
-            report = f"Report generation failed: {e}"
-        self._report_ready.emit(report)
+            review = future.result()
+        except Exception:
+            review = None
+        self._post_review_ready.emit(review)
 
-    def _on_report_ready(self, report: str) -> None:
-        self._report_text.setPlainText(report)
-        self._report_group.setVisible(True)
-        self._save_report(report)
+    @Slot(object)
+    def _on_post_review_ready(self, review) -> None:
+        if review is None:
+            self._set_report_message("Post-mission review failed.")
+            return
+        self._populate_report(review)
+        self._save_post_review(review)
 
-    def _save_report(self, report: str) -> None:
-        import datetime
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    def _build_flight_log(self, plan: MissionPlan) -> FlightLog:
+        ended = datetime.now(timezone.utc)
+        started = None
+        flight_time = 0.0
+        if self._mission_start_time is not None:
+            started = datetime.fromtimestamp(self._mission_start_time, tz=timezone.utc)
+            flight_time = max(0.0, (ended - started).total_seconds())
+
+        tele = self._last_telemetry or {}
+        alt_m = tele.get("alt")
+        max_alt_ft = float(alt_m) * 3.28084 if isinstance(alt_m, (int, float)) else 0.0
+
+        return FlightLog(
+            mission_id=plan.mission_id,
+            started_at_utc=started,
+            ended_at_utc=ended,
+            preflight=FlightLogPreflight(
+                battery_percent=tele.get("battery"),
+                gps_fix=str(tele.get("gps_fix_type", "")),
+                operator_acknowledged_risk_review=(
+                    plan.risk_review.operator_acknowledged
+                    if plan.risk_review else False
+                ),
+            ),
+            execution=FlightLogExecution(
+                max_altitude_agl_ft=max_alt_ft,
+                flight_time_seconds=flight_time,
+                mission_completed=True,
+            ),
+        )
+
+    def _save_post_review(self, review) -> None:
+        import datetime as _dt
+        ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        lines: list[str] = []
+        if review.llm_model:
+            lines.append(f"via {review.llm_model}")
+            lines.append("")
+        if review.plain_english_summary:
+            lines.append("Summary:")
+            lines.append(review.plain_english_summary)
+            lines.append("")
+        if review.findings:
+            lines.append("Findings:")
+            for f in review.findings:
+                lines.append(f"  [{f.category}] {f.message}")
+            lines.append("")
+        if review.recommended_followups:
+            lines.append("Recommended Follow-ups:")
+            for item in review.recommended_followups:
+                lines.append(f"  - {item}")
         try:
             _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-            (_REPORTS_DIR / f"mission_report_{ts}.txt").write_text(report, encoding="utf-8")
+            (_REPORTS_DIR / f"mission_report_{ts}.txt").write_text(
+                "\n".join(lines), encoding="utf-8",
+            )
         except OSError:
             pass
